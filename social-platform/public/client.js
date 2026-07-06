@@ -14,6 +14,9 @@ const STORAGE_KEY = 'watchparty:settings:v1';
 const THEME_OPTIONS = [
   { value: 'midnight', label: '午夜' },
   { value: 'daylight', label: '日光' },
+  { value: 'mist', label: '薄雾' },
+  { value: 'sakura', label: '初樱' },
+  { value: 'cream', label: '奶油' },
   { value: 'ocean', label: '海盐' },
   { value: 'forest', label: '松林' },
   { value: 'cinema', label: '影院' },
