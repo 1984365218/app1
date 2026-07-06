@@ -10,21 +10,26 @@
 
 const socket = io();
 let myPubKey = null; // 自己的 ECDH 公钥（base64），进入房间后广播
+const STORAGE_KEY = 'watchparty:settings:v1';
+const savedSettings = loadSettings();
+const initialInviteRoom = parseInviteRoomFromUrl();
 
 // ---------- 全局状态 ----------
 let myId = null;
-let myName = '';
+let myName = savedSettings.userName || '';
 let currentRoomId = null;
 let roomUsers = [];
 let isHost = false;
-let currentBiliQn = '720P'; // 当前选中的 B 站清晰度
+let currentBiliQn = savedSettings.biliQn || '720P'; // 当前选中的 B 站清晰度
 
 let videoState = { url: '', fileName: '', bili: '', playing: false, currentTime: 0, lastControllerId: '', lastController: '' };
 let controllerId = '';
 let lastVideoTitle = ''; // 观影模式标题
+let localFileName = '';
+let localFileUrl = '';
 
 let watchModeOn = false; // 是否处于观影模式（弹幕）
-let danmakuOn = true;    // 弹幕开关
+let danmakuOn = savedSettings.danmakuOn !== false;    // 弹幕开关
 
 let applyingRemote = false; // 正在应用远端指令，避免事件回环
 let dashPlayer = null;      // dash.js 播放器实例（仅 B 站等 DASH 流使用，已弃用，保留占位）
@@ -41,16 +46,115 @@ const $ = (id) => document.getElementById(id);
 const lobby = $('lobby');
 const room = $('room');
 
+function loadSettings() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveSetting(key, value) {
+  savedSettings[key] = value;
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(savedSettings)); } catch (e) {}
+}
+
+function normalizeRoomId(roomId) {
+  return String(roomId || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function parseInviteRoomFromUrl() {
+  const match = location.pathname.match(/^\/r\/([A-Za-z0-9]+)/);
+  if (match) return normalizeRoomId(match[1]);
+  const param = new URLSearchParams(location.search).get('room');
+  return param ? normalizeRoomId(param) : '';
+}
+
+function inviteLink(roomId) {
+  return `${location.origin}/r/${normalizeRoomId(roomId)}`;
+}
+
+if (myName) $('userName').value = myName;
+if (initialInviteRoom) {
+  $('joinRoomId').value = initialInviteRoom;
+  $('btnJoin').textContent = '加入邀请';
+  $('inviteRoomLabel').textContent = initialInviteRoom;
+  $('inviteNotice').classList.remove('hidden');
+}
+
 // ---------- 加密可用性兜底（正常情况 crypto-polyfill.js 已注入 crypto.subtle） ----------
 // 若 polyfill 也未加载成功（crypto.subtle 仍缺失），给出提示而非直接崩溃。
 if (!window.crypto || !crypto.subtle) {
   window.addEventListener('DOMContentLoaded', () => {
     const b = document.createElement('div');
     b.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:99999;background:#b91c1c;color:#fff;padding:10px 16px;font-size:14px;text-align:center;line-height:1.5';
-    b.textContent = '端到端加密不可用：crypto.subtle 缺失。请改用 https:// 或 http://localhost 访问，或确认 vendor/crypto-polyfill.js 已正确加载。';
+    b.textContent = '当前浏览器无法启用加密聊天。请使用 HTTPS 地址访问，或刷新后重试。';
     document.body.appendChild(b);
   });
 }
+
+function buildEnvStatus() {
+  const secure = !!window.isSecureContext;
+  const cryptoOk = !!(window.crypto && crypto.subtle);
+  const micOk = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  const realtimeOk = socket.connected;
+  const items = [
+    { label: '安全访问', status: secure ? 'ok' : 'warn' },
+    { label: '加密聊天', status: cryptoOk ? 'ok' : 'bad' },
+    { label: '连麦权限', status: micOk ? 'ok' : 'warn' },
+    { label: '实时同步', status: realtimeOk ? 'ok' : 'warn' },
+  ];
+  const notes = [];
+  if (!secure) notes.push('当前不是 HTTPS，浏览器会限制麦克风和部分原生能力。公网服务器请通过 Nginx HTTPS 地址访问。');
+  if (!cryptoOk) notes.push('加密能力不可用，聊天无法正常发送。请刷新页面或换用现代浏览器。');
+  if (!realtimeOk) notes.push('正在连接实时同步服务，若长时间未恢复请检查 Nginx WebSocket 反代配置。');
+  return { items, notes };
+}
+
+function renderEnvStatus() {
+  const { items, notes } = buildEnvStatus();
+  const hasBad = items.some((i) => i.status === 'bad');
+  const hasWarn = items.some((i) => i.status === 'warn');
+  const summary = hasBad ? '需要处理' : (hasWarn ? '部分受限' : '全部可用');
+
+  $('envSummary').textContent = summary;
+  const checks = $('envChecks');
+  checks.innerHTML = '';
+  items.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = `env-item env-${item.status}`;
+    row.innerHTML = '<span class="env-dot"></span><span></span>';
+    row.querySelector('span:last-child').textContent = item.label;
+    checks.appendChild(row);
+  });
+  const note = document.createElement('div');
+  note.className = 'env-note';
+  note.textContent = notes[0] || '当前环境可以正常使用观影、聊天和连麦。';
+  checks.appendChild(note);
+
+  const chip = $('roomEnvChip');
+  chip.className = `env-chip ${hasBad ? 'bad' : (hasWarn ? 'warn' : 'ok')}`;
+  chip.textContent = summary;
+
+  const roomNotice = $('roomEnvNotice');
+  roomNotice.textContent = notes.join(' ');
+  roomNotice.classList.toggle('hidden', notes.length === 0);
+}
+
+socket.on('connect', () => {
+  myId = socket.id;
+  renderEnvStatus();
+});
+socket.on('disconnect', renderEnvStatus);
+socket.on('connect_error', renderEnvStatus);
+$('roomEnvChip').addEventListener('click', () => {
+  const notice = $('roomEnvNotice');
+  if (!notice.textContent) {
+    notice.textContent = '当前环境可以正常使用观影、聊天和连麦。';
+  }
+  notice.classList.toggle('hidden');
+});
+renderEnvStatus();
 
 // ===================================================================
 //  端到端加密（ECDH P-256 + AES-GCM 群密钥）
@@ -149,33 +253,72 @@ function avatarText(name) {
 // ===================================================================
 //  大厅
 // ===================================================================
-$('btnCreate').addEventListener('click', async () => {
-  myName = $('userName').value.trim() || `用户${Math.random().toString(36).slice(2, 6)}`;
-  myPubKey = await cqCrypto.initLocal();
-  await cqCrypto.createGroupKey();
-  socket.emit('room:create', { roomName: '', userName: myName }, (res) => {
-    if (res && res.roomId) enterRoom(res.roomId);
-  });
-});
-$('btnJoin').addEventListener('click', async () => {
-  const rid = $('joinRoomId').value.trim();
-  if (!rid) return alert('请输入房间号');
-  myName = $('userName').value.trim() || `用户${Math.random().toString(36).slice(2, 6)}`;
-  myPubKey = await cqCrypto.initLocal();
-  socket.emit('room:join', { roomId: rid, userName: myName }, (res) => {
-    if (res && res.error) return alert(res.error);
-    enterRoom(rid);
-  });
+$('btnCreate').addEventListener('click', createRoom);
+$('btnJoin').addEventListener('click', () => joinRoom($('joinRoomId').value));
+$('joinRoomId').addEventListener('keydown', (e) => { if (e.key === 'Enter') joinRoom($('joinRoomId').value); });
+$('userName').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    if (initialInviteRoom) joinRoom(initialInviteRoom);
+    else createRoom();
+  }
 });
 
-function enterRoom(roomId) {
-  currentRoomId = roomId;
+async function prepareIdentity({ host = false } = {}) {
+  myName = $('userName').value.trim() || `用户${Math.random().toString(36).slice(2, 6)}`;
+  saveSetting('userName', myName);
+  try {
+    myPubKey = await cqCrypto.initLocal();
+    if (host) await cqCrypto.createGroupKey();
+  } catch (e) {
+    alert('当前浏览器无法启用加密聊天。请使用 HTTPS 地址访问，或刷新后重试。');
+    throw e;
+  }
+}
+
+async function createRoom() {
+  await prepareIdentity({ host: true });
+  socket.emit('room:create', { roomName: '', userName: myName }, (res) => {
+    if (res && res.roomId) {
+      enterRoom(res.roomId, { created: true });
+    }
+  });
+}
+
+async function joinRoom(roomId, { auto = false } = {}) {
+  const rid = normalizeRoomId(roomId);
+  if (!rid) return alert('请输入房间号或打开邀请链接');
+  await prepareIdentity();
+  socket.emit('room:join', { roomId: rid, userName: myName }, (res) => {
+    if (res && res.error) {
+      if (!auto) alert(res.error);
+      else {
+        $('btnJoin').textContent = '重新加入';
+        alert(`没有找到房间 ${rid}，请确认邀请链接是否仍然有效。`);
+      }
+      return;
+    }
+    enterRoom(rid);
+  });
+}
+
+function enterRoom(roomId, { created = false } = {}) {
+  currentRoomId = normalizeRoomId(roomId);
   lobby.classList.add('hidden');
   room.classList.remove('hidden');
-  $('roomIdLabel').textContent = roomId;
+  $('roomName').textContent = '观影房';
+  $('roomIdLabel').textContent = currentRoomId;
+  $('btnCopy').title = '复制邀请链接';
+  if (history.replaceState) history.replaceState(null, '', `/r/${currentRoomId}`);
   socket.emit('crypto:pubkey', { pubKey: myPubKey });
   appendSystem(`🔒 聊天已端到端加密（ECDH + AES-GCM）`);
-  appendSystem(`🎉 欢迎来到房间「${roomId}」——在这里聊天、分享视频、一起看`);
+  appendSystem(`欢迎来到房间「${currentRoomId}」。邀请链接已准备好，可以直接发给朋友。`);
+  if (created) appendSystem('房间已创建。先加载一个视频，其他人进来后会自动看到当前状态。');
+  renderEnvStatus();
+  setTimeout(() => enterWatch({ auto: true }), 0);
+}
+
+if (initialInviteRoom && myName) {
+  setTimeout(() => joinRoom(initialInviteRoom, { auto: true }), 250);
 }
 
 // ---------- 加密密钥协商 ----------
@@ -208,9 +351,11 @@ socket.on('room:state', ({ room, users, video }) => {
   videoState = { ...videoState, ...video };
   controllerId = video.lastControllerId || '';
   applyVideoState(video, true);
+  if (video.bili || video.url || video.fileName) $('watchLoadPanel').classList.add('hidden');
   updateWatchCta();
 });
 socket.on('room:users', (users) => {
+  myId = socket.id;
   roomUsers = users;
   isHost = !!users.find((u) => u.id === socket.id && u.isHost);
   renderUsers();
@@ -232,6 +377,7 @@ socket.on('user:leave', ({ id }) => {
 // 成员列表（仅成员抽屉使用）
 function renderUsers() {
   const ul = $('userListWatch');
+  $('userCount').textContent = roomUsers.length;
   if (!ul) return;
   ul.innerHTML = '';
   roomUsers.forEach((u) => {
@@ -460,15 +606,17 @@ function updateWatchCta() {
   }
 }
 
-function enterWatch() {
+function enterWatch({ auto = false } = {}) {
   watchModeOn = true;
   watchMode.classList.remove('hidden');
-  if (videoState.bili || videoState.url || videoState.fileName) watchEmpty.classList.add('hidden');
+  const hasVideo = !!(videoState.bili || videoState.url || videoState.fileName);
+  if (hasVideo) watchEmpty.classList.add('hidden');
   else watchEmpty.classList.remove('hidden');
   $('watchTitle').textContent = lastVideoTitle || (videoState.fileName ? videoState.fileName : '共享视频');
+  if (auto && !hasVideo) $('watchLoadPanel').classList.remove('hidden');
   syncWatchUI();
   // 进入即播放（进入观影是用户主动点击，允许自动播放带声音）
-  if (videoState.bili || videoState.url || videoState.fileName) video.play().catch(() => {});
+  if (!auto && hasVideo) video.play().catch(() => {});
 }
 function exitWatch() {
   watchModeOn = false;
@@ -480,10 +628,12 @@ function syncWatchUI() { updatePlayUI(); }
 $('btnWatch').addEventListener('click', enterWatch);
 $('watchCtaBtn').addEventListener('click', enterWatch);
 $('watchExit').addEventListener('click', exitWatch);
+$('emptyLoadBtn').addEventListener('click', () => $('watchLoadPanel').classList.remove('hidden'));
 
 // 加载面板
 $('watchLoad').addEventListener('click', () => $('watchLoadPanel').classList.toggle('hidden'));
 $('watchLoadClose').addEventListener('click', () => $('watchLoadPanel').classList.add('hidden'));
+$('watchInvite').addEventListener('click', () => copyInviteLink());
 
 // 成员抽屉
 $('btnMembers').addEventListener('click', () => $('membersDrawer').classList.remove('hidden'));
@@ -574,6 +724,7 @@ $('wcVolume').addEventListener('input', (e) => {
   const v = parseFloat(e.target.value);
   video.volume = v; videoAudio.volume = v;
   video.muted = v === 0; videoAudio.muted = v === 0;
+  saveSetting('volume', v);
 });
 $('wcFull').addEventListener('click', () => {
   if (!document.fullscreenElement) { if (watchStage.requestFullscreen) watchStage.requestFullscreen(); }
@@ -582,6 +733,7 @@ $('wcFull').addEventListener('click', () => {
 $('wcDanmaku').addEventListener('click', () => {
   danmakuOn = !danmakuOn;
   $('wcDanmaku').classList.toggle('active', danmakuOn);
+  saveSetting('danmakuOn', danmakuOn);
 });
 // 控制条自动显隐
 let ctrlTimer = null;
@@ -597,6 +749,14 @@ watchStage.addEventListener('mousemove', () => {
 // ===================================================================
 const video = $('video');
 const videoAudio = $('videoAudio');
+const savedVolume = Number(savedSettings.volume);
+if (Number.isFinite(savedVolume)) {
+  const v = Math.min(1, Math.max(0, savedVolume));
+  $('wcVolume').value = v;
+  video.volume = v;
+  videoAudio.volume = v;
+}
+$('wcDanmaku').classList.toggle('active', danmakuOn);
 
 $('btnLoadUrl').addEventListener('click', () => {
   const url = $('videoUrl').value.trim();
@@ -609,6 +769,7 @@ $('videoFile').addEventListener('change', (e) => {
   const file = e.target.files[0];
   if (!file) return;
   stopDash();
+  useLocalFile(file);
   socket.emit('video:set', { url: '', fileName: file.name, bili: '' });
   $('watchLoadPanel').classList.add('hidden');
 });
@@ -623,6 +784,7 @@ $('btnLoadBili').addEventListener('click', async () => {
 
 $('biliQuality').addEventListener('change', (e) => {
   currentBiliQn = e.target.value;
+  saveSetting('biliQn', currentBiliQn);
   if (videoState.bili) loadBili(videoState.bili, video.currentTime);
 });
 
@@ -647,10 +809,16 @@ function applyVideoState(v, isInitial) {
     if (video.src !== v.url) video.src = v.url;
     $('videoHint').textContent = '已加载视频链接，点击播放即可（所有人进度同步）。';
   } else if (v.fileName) {
-    stopDash();
+    stopDash({ keepLocal: true });
     watchEmpty.classList.add('hidden');
-    if (isInitial) $('videoHint').textContent = `房主/成员加载了本地文件「${v.fileName}」，请在本机选择相同文件以保证进度一致。`;
-    else $('videoHint').textContent = `有人加载了本地文件「${v.fileName}」，请在本机选择相同文件后点击播放。`;
+    if (localFileName === v.fileName && localFileUrl) {
+      $('videoHint').textContent = `本机已选择「${v.fileName}」，播放进度会和房间同步。`;
+    } else {
+      try { video.removeAttribute('src'); video.load(); } catch (e) {}
+      $('watchLoadPanel').classList.remove('hidden');
+      if (isInitial) $('videoHint').textContent = `房间正在使用本地文件「${v.fileName}」。请在本机选择同名文件后再播放。`;
+      else $('videoHint').textContent = `有人切换到本地文件「${v.fileName}」。请在本机选择同名文件后再播放。`;
+    }
   }
   if (typeof v.currentTime === 'number') {
     if (Math.abs(video.currentTime - v.currentTime) > 0.5) video.currentTime = v.currentTime;
@@ -664,26 +832,46 @@ function parseStartAt(rawUrl) {
   return m ? parseFloat(m[1]) : 0;
 }
 
-function stopDash() {
+function clearLocalFile() {
+  if (localFileUrl) {
+    try { URL.revokeObjectURL(localFileUrl); } catch (e) {}
+  }
+  localFileUrl = '';
+  localFileName = '';
+}
+
+function useLocalFile(file) {
+  clearLocalFile();
+  localFileName = file.name;
+  localFileUrl = URL.createObjectURL(file);
+  video.src = localFileUrl;
+  $('videoHint').textContent = `本机已选择「${file.name}」，可以开始播放；其他人也需要选择同名文件。`;
+  watchEmpty.classList.add('hidden');
+}
+
+function stopDash({ keepLocal = false } = {}) {
   stopBiliSync();
   if (dashPlayer) {
     try { dashPlayer.reset(); } catch (e) {}
     dashPlayer = null;
   }
   try { videoAudio.removeAttribute('src'); videoAudio.load(); } catch (e) {}
+  if (!keepLocal) clearLocalFile();
 }
 
 async function loadBili(bvid, startAt = 0) {
-  $('videoHint').textContent = `正在解析 B 站视频（${currentBiliQn}）…`;
+  stopDash();
+  $('videoHint').textContent = `正在解析视频信息（${currentBiliQn}）…`;
   let data;
   try {
     const res = await fetch(`/api/resolve-bili?url=${encodeURIComponent(bvid)}&qn=${encodeURIComponent(currentBiliQn)}`);
     data = await res.json();
     if (data.error) throw new Error(data.error);
   } catch (e) {
-    $('videoHint').textContent = 'B 站解析失败：' + e.message;
+    $('videoHint').textContent = '解析失败。可能是会员/地区限制、B 站接口拦截，或服务器暂时无法访问 B 站。' + (e.message ? `（${e.message}）` : '');
     return;
   }
+  $('videoHint').textContent = '已拿到清晰度，正在加载视频流…';
 
   const sel = $('biliQuality');
   sel.hidden = false; sel.innerHTML = '';
@@ -694,6 +882,7 @@ async function loadBili(bvid, startAt = 0) {
     sel.appendChild(opt);
   });
   currentBiliQn = data.quality || currentBiliQn;
+  saveSetting('biliQn', currentBiliQn);
   lastVideoTitle = data.title || '';
 
   watchEmpty.classList.add('hidden');
@@ -884,12 +1073,30 @@ function closePeer(id) {
 //  离开
 // ===================================================================
 $('btnLeave').addEventListener('click', leave);
-$('btnCopy').addEventListener('click', () => copyText(currentRoomId));
+$('btnCopy').addEventListener('click', () => copyInviteLink());
 // 复制文本：优先用 navigator.clipboard（仅安全上下文可用），否则降级到 execCommand（http://IP 明文 context 也可用）
-function copyText(text) {
-  const done = () => alert('房间号已复制：' + text);
+function copyInviteLink() {
+  copyText(inviteLink(currentRoomId), '邀请链接已复制：');
+}
+function copyText(text, label = '已复制：') {
+  const done = () => alert(label + text);
   if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+    let settled = false;
+    navigator.clipboard.writeText(text).then(() => {
+      if (settled) return;
+      settled = true;
+      done();
+    }).catch(() => {
+      if (settled) return;
+      settled = true;
+      fallbackCopy(text, done);
+    });
+    setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        fallbackCopy(text, done);
+      }
+    }, 600);
   } else {
     fallbackCopy(text, done);
   }
@@ -907,7 +1114,10 @@ function fallbackCopy(text, done) {
     const ok = document.execCommand('copy');
     document.body.removeChild(ta);
     if (ok && done) done();
-  } catch (e) { /* 忽略：降级失败 */ }
+    else alert('复制失败，请手动复制：' + text);
+  } catch (e) {
+    alert('复制失败，请手动复制：' + text);
+  }
 }
 function leave() {
   if (!confirm('确定离开房间？')) return;

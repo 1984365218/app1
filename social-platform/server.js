@@ -47,6 +47,7 @@ const io = new Server(server, { cors: { origin: '*' } });
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+app.get('/r/:roomId', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 app.get('/health', (req, res) => res.json({ ok: true, rooms: rooms.size }));
 
 // ===================================================================
@@ -65,6 +66,7 @@ const BILI_QN = {
 };
 
 const biliCache = new Map(); // bvid -> { ts, data }
+const ROOM_EMPTY_TTL_MS = Number(process.env.ROOM_EMPTY_TTL_MS) || 5 * 60 * 1000;
 
 async function biliGet(url) {
   const r = await fetch(url, { headers: { 'User-Agent': BILI_UA, Referer: 'https://www.bilibili.com' } });
@@ -227,6 +229,13 @@ app.get('/api/bili-media', async (req, res) => {
 // ===================================================================
 const rooms = new Map(); // id -> { id, name, users: Map, video, createdAt }
 
+function keepRoom(room) {
+  if (room && room.emptyTimer) {
+    clearTimeout(room.emptyTimer);
+    room.emptyTimer = null;
+  }
+}
+
 function genRoomId() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let s = '';
@@ -241,6 +250,7 @@ io.on('connection', (socket) => {
     const id = genRoomId();
     const room = { id, name: roomName || '观影房', users: new Map(), video: { url: '', fileName: '', bili: '', playing: false, currentTime: 0, lastControllerId: '', lastController: '' }, createdAt: Date.now() };
     rooms.set(id, room);
+    keepRoom(room);
     socket.join(id);
     currentRoom = id;
     const user = { id: socket.id, name: userName || '匿名', isHost: true, audio: false };
@@ -252,6 +262,7 @@ io.on('connection', (socket) => {
   socket.on('room:join', ({ roomId, userName }, cb) => {
     const room = rooms.get(roomId.toUpperCase());
     if (!room) return cb && cb({ error: '房间不存在' });
+    keepRoom(room);
     socket.join(roomId.toUpperCase());
     currentRoom = roomId.toUpperCase();
     const user = { id: socket.id, name: userName || '匿名', isHost: false, audio: false };
@@ -279,7 +290,11 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('user:leave', { id: socket.id });
     closePeerAll();
     if (room.users.size === 0) {
-      rooms.delete(currentRoom);
+      const roomId = currentRoom;
+      room.emptyTimer = setTimeout(() => {
+        const latest = rooms.get(roomId);
+        if (latest && latest.users.size === 0) rooms.delete(roomId);
+      }, ROOM_EMPTY_TTL_MS);
     } else {
       // 房主离开，推选新房主
       const host = [...room.users.values()].find((u) => u.isHost);

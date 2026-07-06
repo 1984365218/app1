@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>一起看 · 多人观影社交平台</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="/style.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>" />
 </head>
 <body>
@@ -18,6 +18,10 @@
         <h1>一起看</h1>
       </div>
       <p class="subtitle">多人观影 · 连麦畅聊 · 实时同步</p>
+      <div id="inviteNotice" class="invite-notice hidden">
+        <span>受邀加入房间</span>
+        <strong id="inviteRoomLabel"></strong>
+      </div>
       <div class="form-group">
         <div class="input-icon">👤</div>
         <input id="userName" placeholder="取个昵称吧" maxlength="20" autocomplete="off" />
@@ -29,6 +33,13 @@
       <div class="join-row">
         <input id="joinRoomId" placeholder="输入房间号" maxlength="10" />
         <button id="btnJoin" class="btn-join">加入</button>
+      </div>
+      <div id="envPanel" class="env-panel">
+        <div class="env-head">
+          <span>环境体检</span>
+          <strong id="envSummary">检测中</strong>
+        </div>
+        <div id="envChecks" class="env-checks"></div>
       </div>
       <p class="hint">视频由每个人在本地用自己的网络播放，服务器仅同步进度</p>
     </div>
@@ -46,6 +57,7 @@
           <code id="roomIdLabel"></code>
         </span>
         <span id="controllerTag" class="ctrl-tag hidden"></span>
+        <button id="roomEnvChip" class="env-chip" type="button">环境检测中</button>
       </div>
       <div class="topbar-right">
         <button id="btnMembers" class="btn-icon" title="在线成员">
@@ -60,7 +72,7 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
           <span>开麦</span>
         </button>
-        <button id="btnCopy" class="btn-icon" title="复制房间号">
+        <button id="btnCopy" class="btn-icon" title="复制邀请链接">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
         </button>
         <button id="btnLeave" class="btn-danger">离开</button>
@@ -71,6 +83,8 @@
     <main class="main-layout">
       <section class="chat-section">
         <div class="chat-container">
+
+          <div id="roomEnvNotice" class="room-env-notice hidden"></div>
 
           <!-- 观影 CTA 横幅 -->
           <div id="watchCta" class="watch-cta hidden">
@@ -128,6 +142,9 @@
           <span id="watchTitle" class="watch-title"></span>
         </div>
         <div class="watch-top-right">
+          <button id="watchInvite" class="wt-btn" title="复制邀请链接">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
           <button id="watchLoad" class="wt-btn" title="加载 / 切换视频">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           </button>
@@ -162,6 +179,7 @@
           </div>
           <p class="empty-title">还没有共享视频</p>
           <p class="empty-desc">点右上角「加载」粘贴 B 站链接或选择本地文件，即可和房间里的其他人一起观看，聊天会以弹幕飘过屏幕。</p>
+          <button id="emptyLoadBtn" class="btn-watch">加载视频</button>
         </div>
 
         <!-- 加载面板 -->
@@ -240,9 +258,9 @@
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="vendor/dash.all.min.js"></script>
+  <script src="/vendor/dash.all.min.js"></script>
   <!-- 纯 JS 版 crypto.subtle 垫片：仅在非安全上下文(http://IP)时启用，使端到端加密可用 -->
-  <script src="vendor/crypto-polyfill.js"></script>
-  <script src="client.js"></script>
+  <script src="/vendor/crypto-polyfill.js"></script>
+  <script src="/client.js"></script>
 </body>
 </html>
