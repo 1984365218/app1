@@ -24,6 +24,12 @@ const { Server } = require('socket.io');
 const USE_HTTPS = process.argv.includes('--https') || process.env.HTTPS === '1' || process.env.HTTPS === 'true';
 
 const app = express();
+app.disable('x-powered-by');
+
+// 生产环境建议让 Node 只监听 127.0.0.1，再由 Nginx/Caddy 负责公网 HTTPS。
+// TRUST_PROXY=1 时，Express 会信任反代传来的 X-Forwarded-* 头，便于后续按 HTTPS/来源做判断。
+const TRUST_PROXY = process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true';
+if (TRUST_PROXY) app.set('trust proxy', 1);
 
 let server;
 if (USE_HTTPS) {
@@ -407,13 +413,24 @@ function loadOrCreateCert() {
   return { key: pems.private, cert: pems.cert };
 }
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = process.env.HOST || '';
 const proto = USE_HTTPS && server instanceof https.Server ? 'https' : 'http';
-server.listen(PORT, () => {
-  console.log(`一起看 已启动: ${proto}://localhost:${PORT}`);
+const listenTarget = HOST ? `${HOST}:${PORT}` : `0.0.0.0:${PORT}`;
+const onListen = () => {
+  console.log(`一起看 已启动: ${proto}://${listenTarget}`);
+  if (HOST && HOST !== '127.0.0.1' && HOST !== 'localhost') {
+    console.log(`本机访问: ${proto}://localhost:${PORT}`);
+  }
+  if (TRUST_PROXY) {
+    console.log('已启用 trust proxy，适合部署在 Nginx/Caddy HTTPS 反代后面。');
+  }
   if (proto === 'https') {
     const lan = localIPs().find((i) => i !== 'localhost' && i !== '127.0.0.1');
     console.log(`局域网访问（首次需在浏览器点击「高级 → 继续访问」信任自签名证书）:`);
     console.log(`  ${proto}://${lan || '<本机局域网IP>'}:${PORT}`);
   }
-});
+};
+
+if (HOST) server.listen(PORT, HOST, onListen);
+else server.listen(PORT, onListen);

@@ -33,7 +33,7 @@ npm start
 
 多人测试：在不同浏览器/设备打开同一地址，一人「创建房间」拿到房间号，其他人「加入房间」输入该房间号即可。
 
-> 跨设备（不同机器）访问：把 `localhost` 换成运行服务端的电脑局域网 IP（如 `http://192.168.x.x:3000`）。
+> 跨设备（不同机器）访问时建议使用 HTTPS。`http://IP` 属于浏览器非安全上下文，连麦麦克风、原生 WebCrypto、剪贴板等能力会受限制。局域网临时测试可运行 `npm run start:https` 后访问 `https://<局域网IP>:3000` 并信任自签名证书；Ubuntu 公网服务器请看 [deploy/README-ubuntu-https.md](deploy/README-ubuntu-https.md)。
 
 ## 目录结构
 
