@@ -22,12 +22,19 @@ const THEME_OPTIONS = [
   { value: 'cinema', label: '影院' },
 ];
 const DEFAULT_THEME = 'midnight';
+const PROFILE_COLORS = ['#6366f1', '#14b8a6', '#f43f5e', '#f59e0b', '#22c55e', '#0ea5e9', '#a855f7'];
 const savedSettings = loadSettings();
 const initialInviteRoom = parseInviteRoomFromUrl();
 
 // ---------- 全局状态 ----------
 let myId = null;
 let myName = savedSettings.userName || '';
+let userProfile = {
+  id: savedSettings.userId || createLocalUserId(),
+  name: savedSettings.userName || '',
+  avatar: savedSettings.avatar || '',
+  avatarColor: savedSettings.avatarColor || '',
+};
 let currentRoomId = null;
 let roomUsers = [];
 let isHost = false;
@@ -48,6 +55,15 @@ let dashPlayer = null;      // dash.js 播放器实例（仅 B 站等 DASH 流�
 // ---------- WebRTC ----------
 let localStream = null;
 let micOn = false;
+let selectedMicDeviceId = savedSettings.micDeviceId || '';
+let micTestStream = null;
+let audioContext = null;
+let localAudioSource = null;
+let localAnalyser = null;
+let localLevelRaf = 0;
+let lastSpeakingEmit = 0;
+const userAudioLevels = new Map();
+const remoteAudioPrefs = new Map(Object.entries(savedSettings.remoteAudioPrefs || {}));
 const peers = new Map();
 const remoteAudios = new Map();
 const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
@@ -68,6 +84,96 @@ function loadSettings() {
 function saveSetting(key, value) {
   savedSettings[key] = value;
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(savedSettings)); } catch (e) {}
+}
+
+function createLocalUserId() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return `u_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function persistProfile(profile = userProfile) {
+  userProfile = { ...userProfile, ...profile };
+  saveSetting('userId', userProfile.id);
+  saveSetting('userName', userProfile.name || '');
+  saveSetting('avatar', userProfile.avatar || '');
+  saveSetting('avatarColor', userProfile.avatarColor || '');
+}
+
+function avatarInitial(name) {
+  const c = (name || '?').trim().charAt(0).toUpperCase();
+  return c || '?';
+}
+
+function profileColor(seed) {
+  let hash = 0;
+  const s = String(seed || '');
+  for (let i = 0; i < s.length; i++) hash = ((hash << 5) - hash) + s.charCodeAt(i);
+  return PROFILE_COLORS[Math.abs(hash) % PROFILE_COLORS.length];
+}
+
+function renderProfileUi() {
+  const name = userProfile.name || myName || '';
+  const avatarEls = [$('profileAvatar'), $('profileAvatarLarge')].filter(Boolean);
+  avatarEls.forEach((el) => {
+    el.textContent = userProfile.avatar ? '' : avatarInitial(name);
+    el.style.background = userProfile.avatar
+      ? `center / cover no-repeat url("${userProfile.avatar}")`
+      : `linear-gradient(135deg, ${userProfile.avatarColor || profileColor(userProfile.id || name)}, ${profileColor((userProfile.id || name) + '2')})`;
+  });
+  if ($('profileNamePreview')) $('profileNamePreview').textContent = name || '未设置昵称';
+  if ($('profileNameInput')) $('profileNameInput').value = name;
+  if ($('userName') && document.activeElement !== $('userName')) $('userName').value = name;
+}
+
+async function syncUserProfile({ silent = true } = {}) {
+  const nameFromInput = $('userName') ? $('userName').value.trim() : '';
+  const nextName = nameFromInput || userProfile.name || `用户${Math.random().toString(36).slice(2, 6)}`;
+  persistProfile({ ...userProfile, name: nextName });
+  myName = nextName;
+  renderProfileUi();
+  try {
+    const res = await fetch('/api/users/bootstrap', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: userProfile.id, name: userProfile.name, avatar: userProfile.avatar }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || 'profile failed');
+    persistProfile(data);
+    myName = data.name;
+    renderProfileUi();
+    return data;
+  } catch (e) {
+    if (!silent) alert('资料保存失败：' + (e.message || e));
+    return userProfile;
+  }
+}
+
+async function saveProfileFromPanel() {
+  const name = $('profileNameInput').value.trim() || userProfile.name || myName;
+  persistProfile({ name });
+  myName = name;
+  renderProfileUi();
+  const data = await syncUserProfile({ silent: false });
+  if (currentRoomId) socket.emit('user:profile', { userId: data.id, name: data.name, avatar: data.avatar });
+  $('profilePanel').classList.add('hidden');
+}
+
+function readAvatarFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  if (file.size > 512 * 1024) {
+    alert('头像请控制在 512KB 以内');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    persistProfile({ avatar: reader.result });
+    renderProfileUi();
+    syncUserProfile({ silent: true }).then((data) => {
+      if (currentRoomId) socket.emit('user:profile', { userId: data.id, name: data.name, avatar: data.avatar });
+    });
+  };
+  reader.readAsDataURL(file);
 }
 
 function isKnownTheme(theme) {
@@ -123,6 +229,17 @@ function inviteLink(roomId) {
 }
 
 initThemeControls();
+persistProfile(userProfile);
+renderProfileUi();
+syncUserProfile({ silent: true });
+$('avatarPick').addEventListener('click', () => $('avatarInput').click());
+$('profileAvatarPick').addEventListener('click', () => $('profileAvatarInput').click());
+$('avatarInput').addEventListener('change', (e) => { readAvatarFile(e.target.files[0]); e.target.value = ''; });
+$('profileAvatarInput').addEventListener('change', (e) => { readAvatarFile(e.target.files[0]); e.target.value = ''; });
+$('openProfileLobby').addEventListener('click', () => { renderProfileUi(); $('profilePanel').classList.remove('hidden'); });
+$('btnProfile').addEventListener('click', () => { renderProfileUi(); $('profilePanel').classList.remove('hidden'); });
+$('profileClose').addEventListener('click', () => $('profilePanel').classList.add('hidden'));
+$('profileSave').addEventListener('click', saveProfileFromPanel);
 if (myName) $('userName').value = myName;
 if (initialInviteRoom) {
   $('joinRoomId').value = initialInviteRoom;
@@ -314,7 +431,9 @@ $('userName').addEventListener('keydown', (e) => {
 
 async function prepareIdentity({ host = false } = {}) {
   myName = $('userName').value.trim() || `用户${Math.random().toString(36).slice(2, 6)}`;
-  saveSetting('userName', myName);
+  persistProfile({ name: myName });
+  renderProfileUi();
+  await syncUserProfile({ silent: true });
   try {
     myPubKey = await cqCrypto.initLocal();
     if (host) await cqCrypto.createGroupKey();
@@ -326,7 +445,11 @@ async function prepareIdentity({ host = false } = {}) {
 
 async function createRoom() {
   await prepareIdentity({ host: true });
-  socket.emit('room:create', { roomName: '', userName: myName }, (res) => {
+  socket.emit('room:create', { roomName: '', userName: myName, userId: userProfile.id, avatar: userProfile.avatar }, (res) => {
+    if (res && res.user) {
+      persistProfile(res.user);
+      renderProfileUi();
+    }
     if (res && res.roomId) {
       enterRoom(res.roomId, { created: true });
     }
@@ -337,7 +460,11 @@ async function joinRoom(roomId, { auto = false } = {}) {
   const rid = normalizeRoomId(roomId);
   if (!rid) return alert('请输入房间号或打开邀请链接');
   await prepareIdentity();
-  socket.emit('room:join', { roomId: rid, userName: myName }, (res) => {
+  socket.emit('room:join', { roomId: rid, userName: myName, userId: userProfile.id, avatar: userProfile.avatar }, (res) => {
+    if (res && res.user) {
+      persistProfile(res.user);
+      renderProfileUi();
+    }
     if (res && res.error) {
       if (!auto) alert(res.error);
       else {
@@ -393,6 +520,7 @@ socket.on('crypto:groupkey', async ({ fromId, pubKey, env }) => {
 socket.on('room:state', ({ room, users, video }) => {
   $('roomName').textContent = room.name;
   roomUsers = users;
+  roomUsers.forEach((u) => userAudioLevels.set(u.id, u.level || 0));
   isHost = !!users.find((u) => u.id === socket.id && u.isHost);
   myId = socket.id;
   renderUsers();
@@ -407,12 +535,14 @@ socket.on('room:state', ({ room, users, video }) => {
 socket.on('room:users', (users) => {
   myId = socket.id;
   roomUsers = users;
+  roomUsers.forEach((u) => userAudioLevels.set(u.id, u.level || userAudioLevels.get(u.id) || 0));
   isHost = !!users.find((u) => u.id === socket.id && u.isHost);
   renderUsers();
   updateRoomHome();
 });
 socket.on('user:join', ({ user }) => {
   roomUsers.push(user);
+  userAudioLevels.set(user.id, user.level || 0);
   renderUsers();
   if (micOn && myId < user.id) createPeer(user.id);
   appendSystem(`「${user.name}」进入了房间`);
@@ -425,41 +555,138 @@ socket.on('user:leave', ({ id }) => {
   if (u) appendSystem(`「${u.name}」离开了房间`);
 });
 
+function audioPrefKey(id) {
+  const user = roomUsers.find((u) => u.id === id);
+  return (user && user.userId) || id;
+}
+
+function getRemoteAudioPref(id) {
+  return remoteAudioPrefs.get(audioPrefKey(id)) || { volume: 1, muted: false };
+}
+
+function saveRemoteAudioPref(id, pref) {
+  const key = audioPrefKey(id);
+  remoteAudioPrefs.set(key, { ...getRemoteAudioPref(id), ...pref });
+  saveSetting('remoteAudioPrefs', Object.fromEntries(remoteAudioPrefs.entries()));
+  applyRemoteAudioSettings(id);
+}
+
+function applyRemoteAudioSettings(id) {
+  const audio = remoteAudios.get(id);
+  if (!audio) return;
+  const pref = getRemoteAudioPref(id);
+  audio.volume = Math.max(0, Math.min(1, Number(pref.volume)));
+  audio.muted = !!pref.muted;
+}
+
+function setMemberLevel(id, level) {
+  const next = Math.max(0, Math.min(1, Number(level) || 0));
+  userAudioLevels.set(id, next);
+  const bar = document.querySelector(`[data-member-level="${id}"]`);
+  if (bar) bar.style.transform = `scaleX(${Math.max(.04, next)})`;
+  const row = document.querySelector(`[data-member-id="${id}"]`);
+  if (row) row.classList.toggle('speaking', next > .12);
+  if (id === myId) updateMicMeter(next);
+}
+
+function renderMemberAvatar(el, u) {
+  if (u.avatar) {
+    el.textContent = '';
+    el.style.background = `center / cover no-repeat url("${u.avatar}")`;
+    return;
+  }
+  el.textContent = avatarText(u.name);
+  const c1 = u.avatarColor || avatarColor(u.userId || u.id || u.name);
+  el.style.background = `linear-gradient(135deg, ${c1}, ${avatarColor((u.userId || u.name) + '2')})`;
+}
+
 // 成员列表（仅成员抽屉使用）
 function renderUsers() {
   const ul = $('userListWatch');
   $('userCount').textContent = roomUsers.length;
   $('heroUserCount').textContent = roomUsers.length;
-  $('heroMicState').textContent = micOn ? '已开启' : '未开启';
+  const activeMicCount = roomUsers.filter((u) => u.audio).length;
+  $('heroMicState').textContent = activeMicCount ? `${activeMicCount} 人开麦` : '未开启';
   if (!ul) return;
   ul.innerHTML = '';
   roomUsers.forEach((u) => {
     const li = document.createElement('li');
+    li.dataset.memberId = u.id;
+    li.className = u.audio ? 'member-speaking-row mic-open' : 'member-speaking-row';
+
     const avatar = document.createElement('div');
     avatar.className = 'member-avatar';
-    avatar.style.background = `linear-gradient(135deg, ${avatarColor(u.id || u.name)}, ${avatarColor(u.name + '2')})`;
-    avatar.textContent = avatarText(u.name);
+    renderMemberAvatar(avatar, u);
     li.appendChild(avatar);
-    const dot = document.createElement('span');
-    dot.className = u.audio ? 'dot-online' : 'dot-offline';
-    li.appendChild(dot);
+
+    const body = document.createElement('div');
+    body.className = 'member-body';
+
+    const meta = document.createElement('div');
+    meta.className = 'member-meta';
     const name = document.createElement('span');
     name.className = 'member-name';
     name.textContent = u.name;
-    if (u.id === myId) { name.innerHTML += '<span class="member-me">（我）</span>'; }
-    li.appendChild(name);
+    meta.appendChild(name);
+    if (u.id === myId) {
+      const me = document.createElement('span');
+      me.className = 'member-me';
+      me.textContent = '（我）';
+      meta.appendChild(me);
+    }
     if (u.isHost) {
       const t = document.createElement('span');
       t.className = 'tag-host';
-      t.textContent = '👑 房主';
-      li.appendChild(t);
+      t.textContent = '房主';
+      meta.appendChild(t);
     }
-    if (u.audio) {
-      const m = document.createElement('span');
-      m.className = 'tag-mic';
-      m.textContent = '🎙️';
-      li.appendChild(m);
+    body.appendChild(meta);
+
+    const audioLine = document.createElement('div');
+    audioLine.className = 'member-audio-line';
+    const dot = document.createElement('span');
+    dot.className = u.audio ? 'dot-online' : 'dot-offline';
+    audioLine.appendChild(dot);
+    const status = document.createElement('span');
+    status.className = 'member-audio-status';
+    status.textContent = u.audio ? '麦克风已开' : '麦克风关闭';
+    audioLine.appendChild(status);
+    const meter = document.createElement('span');
+    meter.className = 'member-level';
+    const fill = document.createElement('span');
+    fill.dataset.memberLevel = u.id;
+    fill.style.transform = `scaleX(${Math.max(.04, userAudioLevels.get(u.id) || 0)})`;
+    meter.appendChild(fill);
+    audioLine.appendChild(meter);
+    body.appendChild(audioLine);
+
+    if (u.id !== myId) {
+      const pref = getRemoteAudioPref(u.id);
+      const controls = document.createElement('div');
+      controls.className = 'member-audio-controls';
+      const volume = document.createElement('input');
+      volume.type = 'range';
+      volume.min = '0';
+      volume.max = '1';
+      volume.step = '0.05';
+      volume.value = String(pref.volume ?? 1);
+      volume.title = '调整音量';
+      volume.addEventListener('input', () => saveRemoteAudioPref(u.id, { volume: Number(volume.value) }));
+      controls.appendChild(volume);
+      const mute = document.createElement('button');
+      mute.type = 'button';
+      mute.className = 'member-mute';
+      mute.textContent = pref.muted ? '取消静音' : '静音';
+      mute.addEventListener('click', () => {
+        const nextMuted = !getRemoteAudioPref(u.id).muted;
+        saveRemoteAudioPref(u.id, { muted: nextMuted });
+        mute.textContent = nextMuted ? '取消静音' : '静音';
+      });
+      controls.appendChild(mute);
+      body.appendChild(controls);
     }
+
+    li.appendChild(body);
     ul.appendChild(li);
   });
 }
@@ -677,7 +904,8 @@ function updateRoomHome() {
   $('roomHeroTitle').textContent = has ? '片源已就绪' : '准备片源，邀请朋友入座';
   $('roomHeroMeta').textContent = has ? label : '聊天和邀请链接已经可用。';
   $('heroSourceState').textContent = has ? label : '未设置';
-  $('heroMicState').textContent = micOn ? '已开启' : '未开启';
+  const activeMicCount = roomUsers.filter((u) => u.audio).length;
+  $('heroMicState').textContent = activeMicCount ? `${activeMicCount} 人开麦` : (micOn ? '已开启' : '未开启');
   $('heroUserCount').textContent = roomUsers.length;
   $('roomOpenWatchText').textContent = has ? '进入观影' : '选择片源';
   $('roomSourceWatch').textContent = has ? '观影页' : '待片源';
@@ -1093,25 +1321,205 @@ socket.on('video:sync', ({ time, byId }) => {
 // ===================================================================
 $('btnMic').addEventListener('click', toggleMic);
 $('watchMic').addEventListener('click', toggleMic);
+$('btnRefreshMics').addEventListener('click', () => refreshMicDevices({ requestLabel: true }));
+$('btnTestMic').addEventListener('click', toggleMicTest);
+$('micDeviceSelect').addEventListener('change', async (e) => {
+  selectedMicDeviceId = e.target.value;
+  saveSetting('micDeviceId', selectedMicDeviceId);
+  if (micOn) await switchMicDevice();
+});
+
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+  navigator.mediaDevices.addEventListener('devicechange', () => refreshMicDevices({ requestLabel: false }));
+}
+refreshMicDevices({ requestLabel: false });
+
+function micConstraints() {
+  const audio = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  };
+  if (selectedMicDeviceId) audio.deviceId = { exact: selectedMicDeviceId };
+  return { audio };
+}
+
+async function refreshMicDevices({ requestLabel = false } = {}) {
+  const select = $('micDeviceSelect');
+  if (!select || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  if (requestLabel && navigator.mediaDevices.getUserMedia) {
+    let temp = null;
+    try { temp = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) {}
+    if (temp) temp.getTracks().forEach((t) => t.stop());
+  }
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput');
+  select.innerHTML = '';
+  const defaultOpt = document.createElement('option');
+  defaultOpt.value = '';
+  defaultOpt.textContent = '系统默认';
+  select.appendChild(defaultOpt);
+  devices.forEach((device, index) => {
+    const opt = document.createElement('option');
+    opt.value = device.deviceId;
+    opt.textContent = device.label || `输入设备 ${index + 1}`;
+    select.appendChild(opt);
+  });
+  if (selectedMicDeviceId && devices.some((d) => d.deviceId === selectedMicDeviceId)) {
+    select.value = selectedMicDeviceId;
+  } else {
+    selectedMicDeviceId = '';
+    select.value = '';
+    saveSetting('micDeviceId', '');
+  }
+}
+
+async function getSelectedMicStream() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error('麦克风需要 HTTPS 或 localhost 安全上下文');
+  }
+  return navigator.mediaDevices.getUserMedia(micConstraints());
+}
+
+function ensureAudioContext() {
+  if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioContext.state === 'suspended') audioContext.resume().catch(() => {});
+  return audioContext;
+}
+
+function attachLocalMeter(stream) {
+  stopLocalMeter({ keepContext: true });
+  if (!stream) return;
+  const ctx = ensureAudioContext();
+  localAudioSource = ctx.createMediaStreamSource(stream);
+  localAnalyser = ctx.createAnalyser();
+  localAnalyser.fftSize = 512;
+  localAudioSource.connect(localAnalyser);
+  startLocalLevelLoop();
+}
+
+function stopLocalMeter({ keepContext = false } = {}) {
+  if (localLevelRaf) cancelAnimationFrame(localLevelRaf);
+  localLevelRaf = 0;
+  if (localAudioSource) {
+    try { localAudioSource.disconnect(); } catch (e) {}
+    localAudioSource = null;
+  }
+  localAnalyser = null;
+  updateMicMeter(0);
+  if (!keepContext && audioContext && !micOn && !micTestStream) {
+    try { audioContext.close(); } catch (e) {}
+    audioContext = null;
+  }
+}
+
+function updateMicMeter(level) {
+  const pct = Math.round(Math.max(0, Math.min(1, level)) * 100);
+  if ($('micLevelBar')) $('micLevelBar').style.transform = `scaleX(${Math.max(.03, pct / 100)})`;
+  if ($('micLevelBadge')) $('micLevelBadge').textContent = `${pct}%`;
+  if ($('micStatusText')) $('micStatusText').textContent = micOn ? '麦克风已开' : (micTestStream ? '试音中' : '未开麦');
+}
+
+function startLocalLevelLoop() {
+  if (!localAnalyser || localLevelRaf) return;
+  const data = new Uint8Array(localAnalyser.fftSize);
+  const tick = () => {
+    if (!localAnalyser) { localLevelRaf = 0; return; }
+    localAnalyser.getByteTimeDomainData(data);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) {
+      const centered = (data[i] - 128) / 128;
+      sum += centered * centered;
+    }
+    const rms = Math.sqrt(sum / data.length);
+    const level = Math.min(1, rms * 5);
+    setMemberLevel(myId || socket.id, level);
+    if (micOn && Date.now() - lastSpeakingEmit > 160) {
+      lastSpeakingEmit = Date.now();
+      socket.emit('user:speaking', { level });
+    }
+    localLevelRaf = requestAnimationFrame(tick);
+  };
+  localLevelRaf = requestAnimationFrame(tick);
+}
+
+function stopStream(stream) {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+}
+
+async function toggleMicTest() {
+  if (micTestStream) {
+    stopStream(micTestStream);
+    micTestStream = null;
+    $('btnTestMic').textContent = '试音';
+    if (micOn && localStream) attachLocalMeter(localStream);
+    else stopLocalMeter();
+    return;
+  }
+  try {
+    if (micOn && localStream) {
+      attachLocalMeter(localStream);
+    } else {
+      micTestStream = await getSelectedMicStream();
+      attachLocalMeter(micTestStream);
+    }
+    $('btnTestMic').textContent = '停止试音';
+    await refreshMicDevices({ requestLabel: false });
+  } catch (err) {
+    alert('无法打开这个输入设备：' + (err && err.message ? err.message : err));
+  }
+}
+
+function updateMicButtons() {
+  if (micOn) {
+    $('btnMic').innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/><line x1="12" y1="19" x2="12" y2="23"/></svg><span>闭麦</span>';
+    $('watchMic').classList.add('active');
+  } else {
+    $('btnMic').innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg><span>开麦</span>';
+    $('watchMic').classList.remove('active');
+  }
+  updateMicMeter(userAudioLevels.get(myId || socket.id) || 0);
+}
+
+async function switchMicDevice() {
+  try {
+    const nextStream = await getSelectedMicStream();
+    const nextTrack = nextStream.getAudioTracks()[0];
+    peers.forEach((entry) => {
+      const sender = entry.pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
+      if (sender && nextTrack) sender.replaceTrack(nextTrack).catch(() => {});
+    });
+    stopStream(localStream);
+    localStream = nextStream;
+    attachLocalMeter(localStream);
+    socket.emit('user:audio', { enabled: true });
+    await refreshMicDevices({ requestLabel: false });
+  } catch (err) {
+    alert('切换麦克风失败：' + (err && err.message ? err.message : err));
+    refreshMicDevices({ requestLabel: false });
+  }
+}
 
 async function toggleMic() {
   if (!micOn) {
     // 连麦(getUserMedia)是浏览器硬限制：仅 https:// 或 http://localhost 可用；http://IP 明文环境会被直接拒绝
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      alert('麦克风需要安全上下文（HTTPS）。\n当前通过 http://IP 访问，浏览器禁止调用麦克风。\n请改用 https:// 访问：在服务端以 `node server.js --https` 启动，浏览器打开 https://<本机IP>:3000 并信任自签名证书一次即可。');
-      return;
-    }
-    try { localStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    try { localStream = await getSelectedMicStream(); }
     catch (err) {
       if (err && err.name === 'NotAllowedError') alert('麦克风权限被拒绝，请在浏览器地址栏允许麦克风权限后重试。');
       else alert('无法获取麦克风：' + (err && err.message ? err.message : err));
       return;
     }
+    if (micTestStream) {
+      stopStream(micTestStream);
+      micTestStream = null;
+      $('btnTestMic').textContent = '试音';
+    }
     micOn = true;
+    attachLocalMeter(localStream);
     updateRoomHome();
-    $('btnMic').innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/><line x1="12" y1="19" x2="12" y2="23"/></svg><span>闭麦</span>';
-    $('watchMic').classList.add('active');
+    updateMicButtons();
     socket.emit('user:audio', { enabled: true });
+    await refreshMicDevices({ requestLabel: false });
     roomUsers.forEach((u) => {
       if (u.id === myId) return;
       const entry = peers.get(u.id);
@@ -1121,11 +1529,13 @@ async function toggleMic() {
   } else {
     micOn = false;
     updateRoomHome();
-    $('btnMic').innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg><span>开麦</span>';
-    $('watchMic').classList.remove('active');
+    updateMicButtons();
     socket.emit('user:audio', { enabled: false });
+    socket.emit('user:speaking', { level: 0 });
     peers.forEach((_, id) => closePeer(id));
-    if (localStream) { localStream.getTracks().forEach((t) => t.stop()); localStream = null; }
+    stopStream(localStream);
+    localStream = null;
+    stopLocalMeter();
   }
 }
 
@@ -1165,7 +1575,13 @@ socket.on('rtc:signal', async ({ from, data }) => {
   }
   await handleSignal(from, data);
 });
-socket.on('user:audio', ({ id, enabled }) => { if (!enabled) closePeer(id); });
+socket.on('user:audio', ({ id, enabled }) => {
+  if (!enabled) {
+    setMemberLevel(id, 0);
+    closePeer(id);
+  }
+});
+socket.on('user:speaking', ({ id, level }) => setMemberLevel(id, level));
 
 function attachRemote(stream, id) {
   let a = remoteAudios.get(id);
@@ -1176,6 +1592,7 @@ function attachRemote(stream, id) {
     remoteAudios.set(id, a);
   }
   a.srcObject = stream;
+  applyRemoteAudioSettings(id);
 }
 function closePeer(id) {
   const entry = peers.get(id);

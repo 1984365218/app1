@@ -17,6 +17,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { Readable } = require('stream');
 const { Server } = require('socket.io');
+const initSqlJs = require('sql.js');
 
 // 是否启用 HTTPS：端到端加密(crypto.subtle)与连麦(getUserMedia)都要求「安全上下文」，
 // 即 https:// 或 http://localhost。局域网用 http://<IP> 访问时 crypto.subtle 为 undefined，
@@ -45,10 +46,267 @@ if (USE_HTTPS) {
 }
 const io = new Server(server, { cors: { origin: '*' } });
 
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// ===================================================================
+//  SQLite persistence (sql.js, no native build required)
+// ===================================================================
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, 'watchparty.sqlite');
+let SQL = null;
+let db = null;
+let persistTimer = null;
+
+const DEFAULT_VIDEO = {
+  url: '',
+  fileName: '',
+  bili: '',
+  playing: false,
+  currentTime: 0,
+  lastControllerId: '',
+  lastController: '',
+};
+
+const dbReady = initPersistence();
+
+async function initPersistence() {
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+  SQL = await initSqlJs({
+    locateFile: (file) => path.join(__dirname, 'node_modules', 'sql.js', 'dist', file),
+  });
+  if (fs.existsSync(DB_PATH)) {
+    db = new SQL.Database(fs.readFileSync(DB_PATH));
+  } else {
+    db = new SQL.Database();
+  }
+  db.run('PRAGMA foreign_keys = ON');
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      avatar TEXT NOT NULL DEFAULT '',
+      avatar_color TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS rooms (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      host_user_id TEXT NOT NULL DEFAULT '',
+      video_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_rooms_updated_at ON rooms(updated_at);
+  `);
+  persistDbNow();
+  console.log(`[db] SQLite ready: ${DB_PATH}`);
+}
+
+function persistDbNow() {
+  if (!db) return;
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+  const tmp = `${DB_PATH}.tmp`;
+  fs.writeFileSync(tmp, Buffer.from(db.export()));
+  fs.renameSync(tmp, DB_PATH);
+}
+
+function schedulePersist(delay = 250) {
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    try { persistDbNow(); } catch (e) { console.error('[db] persist failed:', e); }
+  }, delay);
+}
+
+function dbGet(sql, params = []) {
+  const stmt = db.prepare(sql);
+  try {
+    stmt.bind(params);
+    if (!stmt.step()) return null;
+    return stmt.getAsObject();
+  } finally {
+    stmt.free();
+  }
+}
+
+function dbRun(sql, params = []) {
+  const stmt = db.prepare(sql);
+  try {
+    stmt.run(params);
+  } finally {
+    stmt.free();
+  }
+}
+
+function normalizeId(value, fallback = '') {
+  const s = String(value || '').trim();
+  return /^[A-Za-z0-9_-]{8,80}$/.test(s) ? s : fallback;
+}
+
+function normalizeRoomId(roomId) {
+  return String(roomId || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+}
+
+function cleanText(value, fallback, max = 40) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return (text || fallback).slice(0, max);
+}
+
+function cleanAvatar(value) {
+  const avatar = String(value || '').trim();
+  if (!avatar) return '';
+  if (avatar.length > 512 * 1024) return '';
+  if (!/^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/i.test(avatar)) return '';
+  return avatar;
+}
+
+function avatarColor(seed) {
+  const colors = ['#6366f1', '#14b8a6', '#f43f5e', '#f59e0b', '#22c55e', '#0ea5e9', '#a855f7'];
+  let hash = 0;
+  const s = String(seed || '');
+  for (let i = 0; i < s.length; i++) hash = ((hash << 5) - hash) + s.charCodeAt(i);
+  return colors[Math.abs(hash) % colors.length];
+}
+
+function publicUser(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    avatar: row.avatar || '',
+    avatarColor: row.avatar_color || avatarColor(row.id || row.name),
+  };
+}
+
+function upsertUser({ id, name, avatar }) {
+  const now = Date.now();
+  const userId = normalizeId(id) || crypto.randomUUID();
+  const safeName = cleanText(name, `用户${userId.slice(0, 4)}`, 20);
+  const safeAvatar = cleanAvatar(avatar);
+  const existing = dbGet('SELECT * FROM users WHERE id = ?', [userId]);
+  const finalAvatar = safeAvatar || (existing && existing.avatar) || '';
+  const finalColor = (existing && existing.avatar_color) || avatarColor(userId);
+  dbRun(`
+    INSERT INTO users (id, name, avatar, avatar_color, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      avatar = excluded.avatar,
+      avatar_color = excluded.avatar_color,
+      updated_at = excluded.updated_at
+  `, [userId, safeName, finalAvatar, finalColor, existing ? existing.created_at : now, now]);
+  schedulePersist();
+  return publicUser(dbGet('SELECT * FROM users WHERE id = ?', [userId]));
+}
+
+function defaultRoomVideo(video = {}) {
+  return { ...DEFAULT_VIDEO, ...(video || {}) };
+}
+
+function roomFromRow(row) {
+  if (!row) return null;
+  let video = {};
+  try { video = JSON.parse(row.video_json || '{}'); } catch (e) { video = {}; }
+  return {
+    id: row.id,
+    name: row.name,
+    hostUserId: row.host_user_id || '',
+    users: new Map(),
+    video: defaultRoomVideo(video),
+    createdAt: row.created_at || Date.now(),
+    updatedAt: row.updated_at || Date.now(),
+  };
+}
+
+function saveRoom(room, { flushDelay = 250 } = {}) {
+  if (!room) return;
+  const now = Date.now();
+  const createdAt = room.createdAt || now;
+  room.updatedAt = now;
+  dbRun(`
+    INSERT INTO rooms (id, name, host_user_id, video_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      host_user_id = excluded.host_user_id,
+      video_json = excluded.video_json,
+      updated_at = excluded.updated_at
+  `, [room.id, cleanText(room.name, '观影房', 40), room.hostUserId || '', JSON.stringify(defaultRoomVideo(room.video)), createdAt, now]);
+  schedulePersist(flushDelay);
+}
+
+function loadRoom(roomId) {
+  const id = normalizeRoomId(roomId);
+  if (!id) return null;
+  if (rooms.has(id)) return rooms.get(id);
+  const row = dbGet('SELECT * FROM rooms WHERE id = ?', [id]);
+  const room = roomFromRow(row);
+  if (room) rooms.set(id, room);
+  return room;
+}
+
+function roomExists(roomId) {
+  const id = normalizeRoomId(roomId);
+  return !!id && (!!rooms.get(id) || !!dbGet('SELECT id FROM rooms WHERE id = ?', [id]));
+}
+
+function makeRoomUser(socketId, profile, room) {
+  const firstActiveUser = room.users.size === 0;
+  return {
+    id: socketId,
+    userId: profile.id,
+    name: profile.name,
+    avatar: profile.avatar,
+    avatarColor: profile.avatarColor,
+    isHost: firstActiveUser || room.hostUserId === profile.id,
+    audio: false,
+    level: 0,
+  };
+}
+
+function publicRoom(room) {
+  return {
+    id: room.id,
+    name: room.name,
+    createdAt: room.createdAt,
+    updatedAt: room.updatedAt,
+  };
+}
+
+app.post('/api/users/bootstrap', async (req, res) => {
+  try {
+    await dbReady;
+    const body = req.body || {};
+    res.json(upsertUser({ id: body.userId || body.id, name: body.name, avatar: body.avatar }));
+  } catch (e) {
+    console.error('[api] user bootstrap failed:', e);
+    res.status(500).json({ error: '用户初始化失败' });
+  }
+});
+
+app.patch('/api/users/:id', async (req, res) => {
+  try {
+    await dbReady;
+    const id = normalizeId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效用户 ID' });
+    res.json(upsertUser({ ...(req.body || {}), id }));
+  } catch (e) {
+    console.error('[api] user update failed:', e);
+    res.status(500).json({ error: '用户资料保存失败' });
+  }
+});
+
 app.get('/r/:roomId', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
-app.get('/health', (req, res) => res.json({ ok: true, rooms: rooms.size }));
+app.get('/health', async (req, res) => {
+  try {
+    await dbReady;
+    res.json({ ok: true, rooms: rooms.size, db: 'ok' });
+  } catch (e) {
+    res.status(500).json({ ok: false, db: 'error' });
+  }
+});
 
 // ===================================================================
 //  B 站链接解析（服务端只解析地址，不传输视频；各客户端自行从 B 站 CDN 拉流）
@@ -227,7 +485,7 @@ app.get('/api/bili-media', async (req, res) => {
 // ===================================================================
 //  房间 / Socket 通信
 // ===================================================================
-const rooms = new Map(); // id -> { id, name, users: Map, video, createdAt }
+const rooms = new Map(); // id -> { id, name, hostUserId, users: Map, video, createdAt }
 
 function keepRoom(room) {
   if (room && room.emptyTimer) {
@@ -238,39 +496,72 @@ function keepRoom(room) {
 
 function genRoomId() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let s = '';
-  for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
-  return s;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    let s = '';
+    for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
+    if (!roomExists(s)) return s;
+  }
+  return crypto.randomUUID().replace(/-/g, '').slice(0, 8).toUpperCase();
 }
 
 io.on('connection', (socket) => {
   let currentRoom = null;
 
-  socket.on('room:create', ({ roomName, userName }, cb) => {
-    const id = genRoomId();
-    const room = { id, name: roomName || '观影房', users: new Map(), video: { url: '', fileName: '', bili: '', playing: false, currentTime: 0, lastControllerId: '', lastController: '' }, createdAt: Date.now() };
-    rooms.set(id, room);
-    keepRoom(room);
-    socket.join(id);
-    currentRoom = id;
-    const user = { id: socket.id, name: userName || '匿名', isHost: true, audio: false };
-    room.users.set(socket.id, user);
-    if (typeof cb === 'function') cb({ roomId: id });
-    io.to(id).emit('room:users', [...room.users.values()]);
+  socket.on('room:create', async ({ roomName, userName, userId, avatar }, cb) => {
+    try {
+      await dbReady;
+      const profile = upsertUser({ id: userId, name: userName, avatar });
+      const id = genRoomId();
+      const now = Date.now();
+      const room = {
+        id,
+        name: cleanText(roomName, '观影房', 40),
+        hostUserId: profile.id,
+        users: new Map(),
+        video: defaultRoomVideo(),
+        createdAt: now,
+        updatedAt: now,
+      };
+      rooms.set(id, room);
+      keepRoom(room);
+      socket.join(id);
+      currentRoom = id;
+      const user = makeRoomUser(socket.id, profile, room);
+      user.isHost = true;
+      room.users.set(socket.id, user);
+      saveRoom(room, { flushDelay: 0 });
+      if (typeof cb === 'function') cb({ roomId: id, user: profile });
+      io.to(id).emit('room:users', [...room.users.values()]);
+    } catch (e) {
+      console.error('[room:create] failed:', e);
+      if (typeof cb === 'function') cb({ error: '创建房间失败' });
+    }
   });
 
-  socket.on('room:join', ({ roomId, userName }, cb) => {
-    const room = rooms.get(roomId.toUpperCase());
-    if (!room) return cb && cb({ error: '房间不存在' });
-    keepRoom(room);
-    socket.join(roomId.toUpperCase());
-    currentRoom = roomId.toUpperCase();
-    const user = { id: socket.id, name: userName || '匿名', isHost: false, audio: false };
-    room.users.set(socket.id, user);
-    socket.to(roomId.toUpperCase()).emit('user:join', { user });
-    socket.emit('room:state', { room: { id: room.id, name: room.name }, users: [...room.users.values()], video: room.video });
-    io.to(currentRoom).emit('room:users', [...room.users.values()]);
-    cb && cb({ ok: true });
+  socket.on('room:join', async ({ roomId, userName, userId, avatar }, cb) => {
+    try {
+      await dbReady;
+      const rid = normalizeRoomId(roomId);
+      const room = loadRoom(rid);
+      if (!room) return cb && cb({ error: '房间不存在' });
+      keepRoom(room);
+      const profile = upsertUser({ id: userId, name: userName, avatar });
+      socket.join(rid);
+      currentRoom = rid;
+      const user = makeRoomUser(socket.id, profile, room);
+      if (user.isHost && !room.hostUserId) {
+        room.hostUserId = profile.id;
+        saveRoom(room);
+      }
+      room.users.set(socket.id, user);
+      socket.to(rid).emit('user:join', { user });
+      socket.emit('room:state', { room: publicRoom(room), users: [...room.users.values()], video: room.video });
+      io.to(currentRoom).emit('room:users', [...room.users.values()]);
+      cb && cb({ ok: true, user: profile });
+    } catch (e) {
+      console.error('[room:join] failed:', e);
+      cb && cb({ error: '加入房间失败' });
+    }
   });
 
   socket.on('user:rename', ({ name }) => {
@@ -278,8 +569,25 @@ io.on('connection', (socket) => {
     if (!room) return;
     const u = room.users.get(socket.id);
     if (u && name) {
-      u.name = name.toString().slice(0, 20);
+      u.name = cleanText(name, u.name || '匿名', 20);
       io.to(currentRoom).emit('room:users', [...room.users.values()]);
+    }
+  });
+
+  socket.on('user:profile', async ({ userId, name, avatar }) => {
+    try {
+      await dbReady;
+      const room = rooms.get(currentRoom);
+      if (!room) return;
+      const u = room.users.get(socket.id);
+      if (!u || (userId && u.userId !== userId)) return;
+      const profile = upsertUser({ id: u.userId, name, avatar });
+      u.name = profile.name;
+      u.avatar = profile.avatar;
+      u.avatarColor = profile.avatarColor;
+      io.to(currentRoom).emit('room:users', [...room.users.values()]);
+    } catch (e) {
+      console.error('[user:profile] failed:', e);
     }
   });
 
@@ -298,7 +606,14 @@ io.on('connection', (socket) => {
     } else {
       // 房主离开，推选新房主
       const host = [...room.users.values()].find((u) => u.isHost);
-      if (!host) { const first = [...room.users.values()][0]; if (first) first.isHost = true; }
+      if (!host) {
+        const first = [...room.users.values()][0];
+        if (first) {
+          first.isHost = true;
+          room.hostUserId = first.userId || room.hostUserId;
+          saveRoom(room);
+        }
+      }
       io.to(currentRoom).emit('room:users', [...room.users.values()]);
     }
     socket.leave(currentRoom);
@@ -354,6 +669,7 @@ io.on('connection', (socket) => {
       lastControllerId: '',
       lastController: '',
     };
+    saveRoom(room);
     io.to(currentRoom).emit('video:state', { ...room.video, action: 'load' });
   });
 
@@ -367,6 +683,7 @@ io.on('connection', (socket) => {
     room.video.updatedAt = Date.now();
     room.video.lastControllerId = socket.id;
     room.video.lastController = u ? u.name : '';
+    saveRoom(room, { flushDelay: 1200 });
     socket.to(currentRoom).emit('video:action', { action, time, by: u ? u.name : '', byId: socket.id, serverTime: Date.now() });
   });
 
@@ -382,8 +699,23 @@ io.on('connection', (socket) => {
     const room = rooms.get(currentRoom);
     if (!room) return;
     const u = room.users.get(socket.id);
-    if (u) u.audio = !!enabled;
+    const isEnabled = !!enabled;
+    if (u) {
+      u.audio = isEnabled;
+      if (!u.audio) u.level = 0;
+    }
     io.to(currentRoom).emit('room:users', [...room.users.values()]);
+    io.to(currentRoom).emit('user:audio', { id: socket.id, enabled: isEnabled });
+  });
+
+  socket.on('user:speaking', ({ level }) => {
+    const room = rooms.get(currentRoom);
+    if (!room) return;
+    const u = room.users.get(socket.id);
+    if (!u || !u.audio) return;
+    const nextLevel = Math.max(0, Math.min(1, Number(level) || 0));
+    u.level = nextLevel;
+    socket.to(currentRoom).emit('user:speaking', { id: socket.id, level: nextLevel });
   });
 
   socket.on('rtc:signal', ({ to, data }) => {
@@ -447,5 +779,24 @@ const onListen = () => {
   }
 };
 
-if (HOST) server.listen(PORT, HOST, onListen);
-else server.listen(PORT, onListen);
+function shutdown() {
+  try {
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+    persistDbNow();
+  } catch (e) {
+    console.error('[db] shutdown persist failed:', e);
+  }
+}
+process.once('SIGINT', () => { shutdown(); process.exit(0); });
+process.once('SIGTERM', () => { shutdown(); process.exit(0); });
+
+dbReady.then(() => {
+  if (HOST) server.listen(PORT, HOST, onListen);
+  else server.listen(PORT, onListen);
+}).catch((e) => {
+  console.error('[db] failed to initialize SQLite:', e);
+  process.exit(1);
+});

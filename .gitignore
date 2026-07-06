@@ -32,5 +32,8 @@ tmp/
 # ===== 自签名 HTTPS 证书（自动生成，勿提交） =====
 social-platform/certs/
 
+# ===== 运行时数据库 / 用户头像（VPS git pull 不覆盖） =====
+social-platform/data/
+
 # ===== 早期残留目录（app1 根目录下的重复 public，应用已迁至 social-platform） =====
 /public/

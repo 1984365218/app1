@@ -11,6 +11,7 @@ Environment=NODE_ENV=production
 Environment=HOST=127.0.0.1
 Environment=PORT=3000
 Environment=TRUST_PROXY=1
+Environment=DATA_DIR=/var/lib/watchparty
 ExecStart=/usr/bin/node server.js
 Restart=always
 RestartSec=3

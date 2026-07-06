@@ -25,6 +25,8 @@
 sudo useradd --system --create-home --shell /usr/sbin/nologin watchparty
 sudo mkdir -p /opt/watchparty
 sudo chown -R watchparty:watchparty /opt/watchparty
+sudo mkdir -p /var/lib/watchparty
+sudo chown -R watchparty:watchparty /var/lib/watchparty
 
 # 把本仓库的 social-platform 目录上传到：
 # /opt/watchparty/social-platform
@@ -36,9 +38,11 @@ npm ci --omit=dev
 先确认 Node 服务能在本机启动：
 
 ```bash
-HOST=127.0.0.1 PORT=3000 TRUST_PROXY=1 node server.js
+HOST=127.0.0.1 PORT=3000 TRUST_PROXY=1 DATA_DIR=/var/lib/watchparty node server.js
 curl http://127.0.0.1:3000/health
 ```
+
+SQLite 数据库默认是 `data/watchparty.sqlite`。VPS 推荐像上面这样把 `DATA_DIR` 指到 `/var/lib/watchparty`，让房间、片源状态、用户昵称和头像脱离 Git 工作目录。仓库里的 `social-platform/data/` 已经加入 `.gitignore`，但生产环境使用 `/var/lib/watchparty` 更稳，后续 `git pull` 不会碰到运行中数据。
 
 ## 2. systemd 常驻运行
 
@@ -56,6 +60,19 @@ sudo systemctl status watchparty
 - `HOST=127.0.0.1`：Node 不直接暴露公网。
 - `PORT=3000`：反代访问的本机端口。
 - `TRUST_PROXY=1`：信任 Nginx 的 `X-Forwarded-*` 头。
+- `DATA_DIR=/var/lib/watchparty`：SQLite 数据和头像等运行时数据放在仓库外。
+
+以后在 VPS 更新代码时，建议先备份数据库再拉取：
+
+```bash
+cd /opt/watchparty/social-platform
+sudo -u watchparty mkdir -p /var/lib/watchparty
+sudo -u watchparty cp /var/lib/watchparty/watchparty.sqlite "/var/lib/watchparty/watchparty.sqlite.$(date +%F-%H%M%S).bak" 2>/dev/null || true
+git pull
+npm ci --omit=dev
+sudo systemctl restart watchparty
+curl http://127.0.0.1:3000/health
+```
 
 ## 3. Nginx + Certbot
 
