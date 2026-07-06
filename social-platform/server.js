@@ -180,7 +180,8 @@ app.get('/api/resolve-bili', async (req, res) => {
 });
 
 // 媒体代理：绕过 B 站 m4s 防盗链（浏览器直连不会带 Referer），并透传 Range 支持拖动进度
-const BILI_MEDIA_HOST = /(^|\.)bilibili\.com$|(^|\.)bilivideo\.(com|cn)$|mcdn\.bilivideo\.cn$/i;
+// B 站 CDN 域名较多（bilivideo / mcdn / akamaized 等），白名单需覆盖全部
+const BILI_MEDIA_HOST = /(^|\.)(bilibili\.com|hdslb\.com|bilivideo\.com|bilivideo\.cn|akamaized\.net)$/i;
 app.get('/api/bili-media', async (req, res) => {
   const url = (req.query.url || '').toString();
   const kind = (req.query.kind || 'video').toString();

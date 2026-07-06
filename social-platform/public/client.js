@@ -794,8 +794,17 @@ $('watchMic').addEventListener('click', toggleMic);
 
 async function toggleMic() {
   if (!micOn) {
+    // 连麦(getUserMedia)是浏览器硬限制：仅 https:// 或 http://localhost 可用；http://IP 明文环境会被直接拒绝
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      alert('麦克风需要安全上下文（HTTPS）。\n当前通过 http://IP 访问，浏览器禁止调用麦克风。\n请改用 https:// 访问：在服务端以 `node server.js --https` 启动，浏览器打开 https://<本机IP>:3000 并信任自签名证书一次即可。');
+      return;
+    }
     try { localStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-    catch (err) { alert('无法获取麦克风：' + err.message); return; }
+    catch (err) {
+      if (err && err.name === 'NotAllowedError') alert('麦克风权限被拒绝，请在浏览器地址栏允许麦克风权限后重试。');
+      else alert('无法获取麦克风：' + (err && err.message ? err.message : err));
+      return;
+    }
     micOn = true;
     $('btnMic').innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/><line x1="12" y1="19" x2="12" y2="23"/></svg><span>闭麦</span>';
     $('watchMic').classList.add('active');
@@ -875,9 +884,31 @@ function closePeer(id) {
 //  离开
 // ===================================================================
 $('btnLeave').addEventListener('click', leave);
-$('btnCopy').addEventListener('click', () => {
-  navigator.clipboard.writeText(currentRoomId).then(() => alert('房间号已复制：' + currentRoomId));
-});
+$('btnCopy').addEventListener('click', () => copyText(currentRoomId));
+// 复制文本：优先用 navigator.clipboard（仅安全上下文可用），否则降级到 execCommand（http://IP 明文 context 也可用）
+function copyText(text) {
+  const done = () => alert('房间号已复制：' + text);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+  } else {
+    fallbackCopy(text, done);
+  }
+}
+function fallbackCopy(text, done) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (ok && done) done();
+  } catch (e) { /* 忽略：降级失败 */ }
+}
 function leave() {
   if (!confirm('确定离开房间？')) return;
   peers.forEach((_, id) => closePeer(id));
