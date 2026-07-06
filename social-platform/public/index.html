@@ -241,6 +241,8 @@
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="vendor/dash.all.min.js"></script>
+  <!-- 纯 JS 版 crypto.subtle 垫片：仅在非安全上下文(http://IP)时启用，使端到端加密可用 -->
+  <script src="vendor/crypto-polyfill.js"></script>
   <script src="client.js"></script>
 </body>
 </html>
