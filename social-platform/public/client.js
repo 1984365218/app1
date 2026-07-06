@@ -314,7 +314,7 @@ function enterRoom(roomId, { created = false } = {}) {
   appendSystem(`欢迎来到房间「${currentRoomId}」。邀请链接已准备好，可以直接发给朋友。`);
   if (created) appendSystem('房间已创建。先加载一个视频，其他人进来后会自动看到当前状态。');
   renderEnvStatus();
-  setTimeout(() => enterWatch({ auto: true }), 0);
+  updateRoomHome();
 }
 
 if (initialInviteRoom && myName) {
@@ -353,12 +353,14 @@ socket.on('room:state', ({ room, users, video }) => {
   applyVideoState(video, true);
   if (video.bili || video.url || video.fileName) $('watchLoadPanel').classList.add('hidden');
   updateWatchCta();
+  updateRoomHome();
 });
 socket.on('room:users', (users) => {
   myId = socket.id;
   roomUsers = users;
   isHost = !!users.find((u) => u.id === socket.id && u.isHost);
   renderUsers();
+  updateRoomHome();
 });
 socket.on('user:join', ({ user }) => {
   roomUsers.push(user);
@@ -378,6 +380,8 @@ socket.on('user:leave', ({ id }) => {
 function renderUsers() {
   const ul = $('userListWatch');
   $('userCount').textContent = roomUsers.length;
+  $('heroUserCount').textContent = roomUsers.length;
+  $('heroMicState').textContent = micOn ? '已开启' : '未开启';
   if (!ul) return;
   ul.innerHTML = '';
   roomUsers.forEach((u) => {
@@ -606,6 +610,44 @@ function updateWatchCta() {
   }
 }
 
+function sourceLabel() {
+  if (lastVideoTitle) return lastVideoTitle;
+  if (videoState.fileName) return videoState.fileName;
+  if (videoState.bili) return 'B 站视频';
+  if (videoState.url) return '视频直链';
+  return '';
+}
+
+function hasVideoSource() {
+  return !!(videoState.bili || videoState.url || videoState.fileName);
+}
+
+function updateRoomHome() {
+  const has = hasVideoSource();
+  const label = sourceLabel();
+  $('roomHeroTitle').textContent = has ? '片源已就绪' : '准备片源，邀请朋友入座';
+  $('roomHeroMeta').textContent = has ? label : '聊天和邀请链接已经可用。';
+  $('heroSourceState').textContent = has ? label : '未设置';
+  $('heroMicState').textContent = micOn ? '已开启' : '未开启';
+  $('heroUserCount').textContent = roomUsers.length;
+  $('roomOpenWatchText').textContent = has ? '进入观影' : '选择片源';
+  $('roomSourceWatch').textContent = has ? '观影页' : '待片源';
+  $('roomSourceHint').textContent = has ? `当前片源：${label}` : '支持 B 站链接、视频直链和本地同名文件。';
+}
+
+function focusRoomSource() {
+  const panel = $('roomSourcePanel');
+  panel.classList.add('source-pulse');
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  setTimeout(() => panel.classList.remove('source-pulse'), 900);
+  setTimeout(() => $('roomBiliUrl').focus(), 120);
+}
+
+function openWatchOrSource() {
+  if (hasVideoSource()) enterWatch();
+  else focusRoomSource();
+}
+
 function enterWatch({ auto = false } = {}) {
   watchModeOn = true;
   watchMode.classList.remove('hidden');
@@ -625,7 +667,10 @@ function exitWatch() {
 }
 function syncWatchUI() { updatePlayUI(); }
 
-$('btnWatch').addEventListener('click', enterWatch);
+$('btnWatch').addEventListener('click', openWatchOrSource);
+$('roomOpenWatch').addEventListener('click', openWatchOrSource);
+$('roomSourceWatch').addEventListener('click', openWatchOrSource);
+$('roomCopyInvite').addEventListener('click', () => copyInviteLink());
 $('watchCtaBtn').addEventListener('click', enterWatch);
 $('watchExit').addEventListener('click', exitWatch);
 $('emptyLoadBtn').addEventListener('click', () => $('watchLoadPanel').classList.remove('hidden'));
@@ -758,29 +803,46 @@ if (Number.isFinite(savedVolume)) {
 }
 $('wcDanmaku').classList.toggle('active', danmakuOn);
 
-$('btnLoadUrl').addEventListener('click', () => {
-  const url = $('videoUrl').value.trim();
+function setVideoUrlSource(url) {
+  url = String(url || '').trim();
   if (!url) return;
   stopDash();
   socket.emit('video:set', { url, fileName: '', bili: '' });
   $('watchLoadPanel').classList.add('hidden');
-});
-$('videoFile').addEventListener('change', (e) => {
-  const file = e.target.files[0];
+  $('roomVideoUrl').value = url;
+}
+
+function setLocalFileSource(file) {
   if (!file) return;
   stopDash();
   useLocalFile(file);
   socket.emit('video:set', { url: '', fileName: file.name, bili: '' });
   $('watchLoadPanel').classList.add('hidden');
-});
-$('btnLoadBili').addEventListener('click', async () => {
-  const url = $('biliUrl').value.trim();
+}
+
+function setBiliSource(url) {
+  url = String(url || '').trim();
   if (!url) return;
   const m = url.match(/BV[0-9A-Za-z]+/);
   if (!m) return alert('请粘贴包含 BV 号的 B 站视频链接');
+  $('biliUrl').value = url;
+  $('roomBiliUrl').value = url;
   socket.emit('video:set', { url: '', fileName: '', bili: m[0] });
   $('watchLoadPanel').classList.add('hidden');
-});
+}
+
+$('btnLoadUrl').addEventListener('click', () => setVideoUrlSource($('videoUrl').value));
+$('roomLoadUrl').addEventListener('click', () => setVideoUrlSource($('roomVideoUrl').value));
+$('videoUrl').addEventListener('keydown', (e) => { if (e.key === 'Enter') setVideoUrlSource($('videoUrl').value); });
+$('roomVideoUrl').addEventListener('keydown', (e) => { if (e.key === 'Enter') setVideoUrlSource($('roomVideoUrl').value); });
+
+$('videoFile').addEventListener('change', (e) => setLocalFileSource(e.target.files[0]));
+$('roomVideoFile').addEventListener('change', (e) => setLocalFileSource(e.target.files[0]));
+
+$('btnLoadBili').addEventListener('click', () => setBiliSource($('biliUrl').value));
+$('roomLoadBili').addEventListener('click', () => setBiliSource($('roomBiliUrl').value));
+$('biliUrl').addEventListener('keydown', (e) => { if (e.key === 'Enter') setBiliSource($('biliUrl').value); });
+$('roomBiliUrl').addEventListener('keydown', (e) => { if (e.key === 'Enter') setBiliSource($('roomBiliUrl').value); });
 
 $('biliQuality').addEventListener('change', (e) => {
   currentBiliQn = e.target.value;
@@ -796,6 +858,7 @@ socket.on('video:state', (v) => {
   $('watchLoadPanel').classList.add('hidden');
   updateWatchCta();
   applyVideoState(v, false);
+  updateRoomHome();
 });
 
 function applyVideoState(v, isInitial) {
@@ -908,6 +971,7 @@ async function loadBili(bvid, startAt = 0) {
   $('videoHint').textContent = `B 站：${data.title}（${data.quality}，各自从 B 站 CDN 拉流，进度同步）`;
   $('watchTitle').textContent = data.title || 'B 站视频';
   updateWatchCta();
+  updateRoomHome();
   video.play().catch(() => {});
 }
 
@@ -995,6 +1059,7 @@ async function toggleMic() {
       return;
     }
     micOn = true;
+    updateRoomHome();
     $('btnMic').innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/><line x1="12" y1="19" x2="12" y2="23"/></svg><span>闭麦</span>';
     $('watchMic').classList.add('active');
     socket.emit('user:audio', { enabled: true });
@@ -1006,6 +1071,7 @@ async function toggleMic() {
     });
   } else {
     micOn = false;
+    updateRoomHome();
     $('btnMic').innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg><span>开麦</span>';
     $('watchMic').classList.remove('active');
     socket.emit('user:audio', { enabled: false });
