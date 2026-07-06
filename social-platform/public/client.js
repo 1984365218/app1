@@ -240,6 +240,21 @@ $('openProfileLobby').addEventListener('click', () => { renderProfileUi(); $('pr
 $('btnProfile').addEventListener('click', () => { renderProfileUi(); $('profilePanel').classList.remove('hidden'); });
 $('profileClose').addEventListener('click', () => $('profilePanel').classList.add('hidden'));
 $('profileSave').addEventListener('click', saveProfileFromPanel);
+function setMobileRoomPanel(panel = 'source') {
+  const next = panel === 'audio' ? 'audio' : 'source';
+  const side = $('roomSide');
+  if (!side) return;
+  side.classList.toggle('mobile-panel-source', next === 'source');
+  side.classList.toggle('mobile-panel-audio', next === 'audio');
+  document.querySelectorAll('[data-mobile-room-panel]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.mobileRoomPanel === next);
+  });
+  saveSetting('mobileRoomPanel', next);
+}
+document.querySelectorAll('[data-mobile-room-panel]').forEach((button) => {
+  button.addEventListener('click', () => setMobileRoomPanel(button.dataset.mobileRoomPanel));
+});
+setMobileRoomPanel(savedSettings.mobileRoomPanel || 'source');
 if (myName) $('userName').value = myName;
 if (initialInviteRoom) {
   $('joinRoomId').value = initialInviteRoom;

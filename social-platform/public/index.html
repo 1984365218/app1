@@ -116,7 +116,7 @@
 
           <div id="roomEnvNotice" class="room-env-notice hidden"></div>
           <div class="chat-body">
-          <aside class="room-side">
+          <aside id="roomSide" class="room-side mobile-panel-source">
           <div id="roomHero" class="room-hero">
             <div class="room-hero-main">
               <div class="room-kicker">房间已就绪</div>
@@ -149,6 +149,11 @@
             </div>
           </div>
 
+          <div class="mobile-room-tabs" aria-label="房间工具">
+            <button class="active" type="button" data-mobile-room-panel="source">片源</button>
+            <button type="button" data-mobile-room-panel="audio">连麦</button>
+          </div>
+
           <div id="roomSourcePanel" class="room-source-panel">
             <div class="source-head">
               <div>
@@ -165,7 +170,7 @@
                 </div>
                 <button id="roomLoadBili" class="btn-load">加载</button>
               </div>
-              <div class="source-line">
+              <div class="source-line source-line-file">
                 <div class="source-input">
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
                   <input id="roomVideoUrl" placeholder="视频直链 URL" />
@@ -229,7 +234,7 @@
               <input id="chatImage" type="file" accept="image/*" multiple hidden />
             </label>
             <div class="input-wrap">
-              <input id="chatInput" placeholder="输入消息…（Enter 发送，可先拖入/粘贴图片再发送）" maxlength="2000" />
+              <input id="chatInput" placeholder="输入消息…" maxlength="2000" />
             </div>
             <button id="btnSend" class="btn-send">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
