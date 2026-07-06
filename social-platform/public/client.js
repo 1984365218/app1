@@ -11,6 +11,14 @@
 const socket = io();
 let myPubKey = null; // 自己的 ECDH 公钥（base64），进入房间后广播
 const STORAGE_KEY = 'watchparty:settings:v1';
+const THEME_OPTIONS = [
+  { value: 'midnight', label: '午夜' },
+  { value: 'daylight', label: '日光' },
+  { value: 'ocean', label: '海盐' },
+  { value: 'forest', label: '松林' },
+  { value: 'cinema', label: '影院' },
+];
+const DEFAULT_THEME = 'midnight';
 const savedSettings = loadSettings();
 const initialInviteRoom = parseInviteRoomFromUrl();
 
@@ -59,6 +67,43 @@ function saveSetting(key, value) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(savedSettings)); } catch (e) {}
 }
 
+function isKnownTheme(theme) {
+  return THEME_OPTIONS.some((item) => item.value === theme);
+}
+
+function normalizeTheme(theme) {
+  return isKnownTheme(theme) ? theme : DEFAULT_THEME;
+}
+
+function applyTheme(theme, { persist = true } = {}) {
+  const nextTheme = normalizeTheme(theme);
+  document.documentElement.dataset.theme = nextTheme;
+  if (persist) saveSetting('theme', nextTheme);
+  document.querySelectorAll('[data-theme-select="true"]').forEach((select) => {
+    if (select.value !== nextTheme) select.value = nextTheme;
+  });
+}
+
+function initThemeControls() {
+  const selects = ['themeSelectLobby', 'themeSelectRoom', 'themeSelectWatch']
+    .map((id) => $(id))
+    .filter(Boolean);
+
+  selects.forEach((select) => {
+    select.innerHTML = '';
+    THEME_OPTIONS.forEach((theme) => {
+      const option = document.createElement('option');
+      option.value = theme.value;
+      option.textContent = theme.label;
+      select.appendChild(option);
+    });
+    select.dataset.themeSelect = 'true';
+    select.addEventListener('change', () => applyTheme(select.value));
+  });
+
+  applyTheme(savedSettings.theme, { persist: false });
+}
+
 function normalizeRoomId(roomId) {
   return String(roomId || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
@@ -74,6 +119,7 @@ function inviteLink(roomId) {
   return `${location.origin}/r/${normalizeRoomId(roomId)}`;
 }
 
+initThemeControls();
 if (myName) $('userName').value = myName;
 if (initialInviteRoom) {
   $('joinRoomId').value = initialInviteRoom;

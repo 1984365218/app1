@@ -4,6 +4,17 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>一起看 · 多人观影社交平台</title>
+  <script>
+    (() => {
+      const fallbackTheme = 'midnight';
+      try {
+        const settings = JSON.parse(localStorage.getItem('watchparty:settings:v1') || '{}');
+        document.documentElement.dataset.theme = settings.theme || fallbackTheme;
+      } catch (e) {
+        document.documentElement.dataset.theme = fallbackTheme;
+      }
+    })();
+  </script>
   <link rel="stylesheet" href="/style.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>" />
 </head>
@@ -18,6 +29,10 @@
         <h1>一起看</h1>
       </div>
       <p class="subtitle">多人观影 · 连麦畅聊 · 实时同步</p>
+      <label class="theme-field">
+        <span>主题风格</span>
+        <select id="themeSelectLobby" class="theme-select" aria-label="主题风格"></select>
+      </label>
       <div id="inviteNotice" class="invite-notice hidden">
         <span>受邀加入房间</span>
         <strong id="inviteRoomLabel"></strong>
@@ -60,6 +75,7 @@
         <button id="roomEnvChip" class="env-chip" type="button">环境检测中</button>
       </div>
       <div class="topbar-right">
+        <select id="themeSelectRoom" class="theme-select topbar-theme" aria-label="主题风格" title="主题风格"></select>
         <button id="btnMembers" class="btn-icon" title="在线成员">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           <span>成员</span>
@@ -75,7 +91,7 @@
         <button id="btnCopy" class="btn-icon" title="复制邀请链接">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
         </button>
-        <button id="btnLeave" class="btn-danger">离开</button>
+        <button id="btnLeave" class="btn-danger" title="离开房间">离开</button>
       </div>
     </header>
 
@@ -201,6 +217,7 @@
           <span id="watchTitle" class="watch-title"></span>
         </div>
         <div class="watch-top-right">
+          <select id="themeSelectWatch" class="theme-select watch-theme" aria-label="主题风格" title="主题风格"></select>
           <button id="watchInvite" class="wt-btn" title="复制邀请链接">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
           </button>
