@@ -1,0 +1,15 @@
+{
+  "name": "watchparty",
+  "version": "1.0.0",
+  "description": "多人观影社交平台：房间、连麦、聊天，服务端仅同步视频进度",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dash.js": "^4.0.0",
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}
