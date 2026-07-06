@@ -10,13 +10,33 @@
 
 const express = require('express');
 const http = require('http');
+const https = require('https');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { Readable } = require('stream');
 const { Server } = require('socket.io');
 
+// 是否启用 HTTPS：端到端加密(crypto.subtle)与连麦(getUserMedia)都要求「安全上下文」，
+// 即 https:// 或 http://localhost。局域网用 http://<IP> 访问时 crypto.subtle 为 undefined，
+// 因此提供自签名证书方案，让局域网也能走安全上下文。
+const USE_HTTPS = process.argv.includes('--https') || process.env.HTTPS === '1' || process.env.HTTPS === 'true';
+
 const app = express();
-const server = http.createServer(app);
+
+let server;
+if (USE_HTTPS) {
+  try {
+    const { key, cert } = loadOrCreateCert();
+    server = https.createServer({ key, cert }, app);
+  } catch (e) {
+    console.error('[https] 生成/加载证书失败，回退为 HTTP：', e.message);
+    server = http.createServer(app);
+  }
+} else {
+  server = http.createServer(app);
+}
 const io = new Server(server, { cors: { origin: '*' } });
 
 app.use(express.json());
@@ -353,5 +373,46 @@ io.on('connection', (socket) => {
   }
 });
 
+// ===================================================================
+//  HTTPS 自签名证书（含局域网 IP，便于浏览器信任后走安全上下文）
+// ===================================================================
+function localIPs() {
+  const set = new Set(['localhost', '127.0.0.1']);
+  const nets = os.networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const ni of nets[name] || []) {
+      if (ni.family === 'IPv4' && !ni.internal) set.add(ni.address);
+    }
+  }
+  return [...set];
+}
+
+function loadOrCreateCert() {
+  const dir = path.join(__dirname, 'certs');
+  const keyPath = path.join(dir, 'server.key');
+  const certPath = path.join(dir, 'server.cert');
+  if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
+    return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
+  }
+  // 首次运行：用 selfsigned 生成自签名证书，SAN 包含本机所有局域网 IP
+  const selfsigned = require('selfsigned');
+  const attrs = [{ name: 'commonName', value: 'localhost' }];
+  const altNames = localIPs().map((ip) => (ip.includes('.') ? { type: 'ip', ip } : { type: 'dns', value: ip }));
+  const pems = selfsigned.generate(attrs, { days: 3650, keySize: 2048, algorithm: 'sha256', altNames });
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(keyPath, pems.private);
+  fs.writeFileSync(certPath, pems.cert);
+  console.log('[https] 已生成自签名证书，SAN:', altNames.map((a) => a.ip || a.value).join(', '));
+  return { key: pems.private, cert: pems.cert };
+}
+
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`一起看 已启动: http://localhost:${PORT}`));
+const proto = USE_HTTPS && server instanceof https.Server ? 'https' : 'http';
+server.listen(PORT, () => {
+  console.log(`一起看 已启动: ${proto}://localhost:${PORT}`);
+  if (proto === 'https') {
+    const lan = localIPs().find((i) => i !== 'localhost' && i !== '127.0.0.1');
+    console.log(`局域网访问（首次需在浏览器点击「高级 → 继续访问」信任自签名证书）:`);
+    console.log(`  ${proto}://${lan || '<本机局域网IP>'}:${PORT}`);
+  }
+});

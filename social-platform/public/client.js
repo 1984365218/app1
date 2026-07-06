@@ -41,6 +41,16 @@ const $ = (id) => document.getElementById(id);
 const lobby = $('lobby');
 const room = $('room');
 
+// ---------- 安全上下文检查（端到端加密依赖 crypto.subtle，仅 HTTPS/localhost 可用） ----------
+if (!window.crypto || !crypto.subtle) {
+  window.addEventListener('DOMContentLoaded', () => {
+    const b = document.createElement('div');
+    b.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:99999;background:#b91c1c;color:#fff;padding:10px 16px;font-size:14px;text-align:center;line-height:1.5';
+    b.textContent = '端到端加密需要安全上下文：请通过 https:// 或 http://localhost 访问（当前 crypto.subtle 不可用，加密与连麦将无法使用）。服务端加 --https 可启用自签名 HTTPS。';
+    document.body.appendChild(b);
+  });
+}
+
 // ===================================================================
 //  端到端加密（ECDH P-256 + AES-GCM 群密钥）
 // ===================================================================
