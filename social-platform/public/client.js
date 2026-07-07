@@ -542,29 +542,34 @@ async function ensureReclaimResolved() {
 // ---------- 房间内「账号中心」增强 ----------
 function renderProfileAccountBox() {
   if ($('profileAccountId')) $('profileAccountId').textContent = userProfile.id ? userProfile.id.slice(0, 8) + '…' : '(无)';
+  const set = !!userProfile.hasPassword;
   if ($('passwordStatus')) {
-    // hasPassword 由 syncUserProfile 写到 userProfile.hasPassword
-    const set = !!userProfile.hasPassword;
     $('passwordStatus').textContent = set
       ? '已设密码：换设备召回此账号时需要输入密码。'
       : '未设密码时，任何人都可凭你的昵称召回此账号——建议起个不太重的昵称，或设个简单密码。';
-    if ($('profilePasswordInput')) $('profilePasswordInput').placeholder = set ? '修改密码（留空保存=清空密码）' : '未设置则留空';
+    if ($('profilePasswordInput')) $('profilePasswordInput').placeholder = set ? '新密码（留空保存=清空密码）' : '未设置则留空';
   }
+  // 已设密码时显示「原密码」输入行（修改/清空需 re-auth），未设密码时隐藏
+  const oldRow = $('oldPasswordRow');
+  if (oldRow) oldRow.classList.toggle('hidden', !set);
 }
 
 async function saveAccountPassword() {
   const pwd = $('profilePasswordInput') ? $('profilePasswordInput').value : '';
+  // 已设密码时，修改/清空需先验证原密码（服务端 re-auth）
+  const oldPwd = (userProfile.hasPassword && $('profileOldPasswordInput')) ? $('profileOldPasswordInput').value : '';
   try {
     const res = await fetch(`/api/users/${encodeURIComponent(userProfile.id)}/password`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ currentUserId: userProfile.id, password: pwd }),
+      body: JSON.stringify({ currentUserId: userProfile.id, password: pwd, oldPassword: oldPwd }),
     });
     const data = await res.json();
     if (!res.ok || data.error) { alert(data.error || '密码保存失败'); return; }
     userProfile.hasPassword = !!data.hasPassword;
     persistProfile(userProfile);
     $('profilePasswordInput').value = '';
+    const oldInput = $('profileOldPasswordInput'); if (oldInput) oldInput.value = '';
     renderProfileAccountBox();
   } catch (e) {
     alert('密码保存失败：' + (e && e.message ? e.message : e));

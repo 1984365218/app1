@@ -281,7 +281,7 @@
       <div id="watchStage" class="watch-stage">
         <video id="video" playsinline></video>
         <audio id="videoAudio" playsinline></audio>
-        <iframe id="videoFrame" allow="autoplay; encrypted-media; fullscreen" allowfullscreen referrerpolicy="no-referrer" style="border:0;width:100%;height:100%;position:absolute;inset:0;background:#000;display:none"></iframe>
+        <iframe id="videoFrame" allow="autoplay; encrypted-media; fullscreen" referrerpolicy="no-referrer" style="border:0;width:100%;height:100%;position:absolute;inset:0;background:#000;display:none"></iframe>
 
         <!-- 弹幕层 -->
         <div id="danmakuLayer" class="danmaku-layer"></div>
@@ -400,6 +400,10 @@
               <span class="profile-row-label">密码（可选）</span>
               <input id="profilePasswordInput" type="password" placeholder="未设置则留空" maxlength="64" autocomplete="new-password" />
               <button id="btnSavePassword" class="btn-sm-wide" type="button">保存密码</button>
+            </div>
+            <div id="oldPasswordRow" class="profile-account-row hidden">
+              <span class="profile-row-label">原密码</span>
+              <input id="profileOldPasswordInput" type="password" placeholder="修改/清空密码需先验证原密码" maxlength="64" autocomplete="off" />
             </div>
             <p id="passwordStatus" class="profile-row-hint">未设置密码时，任何人凭你的昵称都能召回此账号——建议给自己起个不太重的昵称，或设个简单密码。</p>
 
