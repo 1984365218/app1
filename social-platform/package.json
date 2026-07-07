@@ -4,6 +4,9 @@
   "description": "多人观影社交平台：房间、连麦、聊天，服务端仅同步视频进度",
   "main": "server.js",
   "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server.js",
     "start:https": "node server.js --https"

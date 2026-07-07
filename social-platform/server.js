@@ -131,10 +131,18 @@ async function initPersistence() {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members(user_id);
+    CREATE INDEX IF NOT EXISTS idx_room_members_room ON room_members(room_id);
   `);
 
-  // 兼容旧库：为 users 增列 password（用于"昵称+密码"召回）。空串 = 未设置密码。
-  try { db.run(`ALTER TABLE users ADD COLUMN password TEXT NOT NULL DEFAULT ''`); } catch (e) { /* 列已存在则忽略 */ }
+  // 兼容旧库：为 users 增列 password / password_salt（用于"昵称+密码"召回）。空串 = 未设置密码。
+  // 用 PRAGMA table_info 检测列是否存在，比 try/catch 解析报错更稳妥。
+  const cols = dbAll(`PRAGMA table_info(users)`).map((r) => r.name);
+  if (!cols.includes('password')) {
+    try { db.run(`ALTER TABLE users ADD COLUMN password TEXT NOT NULL DEFAULT ''`); } catch (e) { /* 忽略 */ }
+  }
+  if (!cols.includes('password_salt')) {
+    try { db.run(`ALTER TABLE users ADD COLUMN password_salt TEXT NOT NULL DEFAULT ''`); } catch (e) { /* 忽略 */ }
+  }
 
   persistDbNow();
   console.log(`[db] SQLite ready: ${DB_PATH}`);
@@ -374,24 +382,29 @@ app.post('/api/users/bootstrap', async (req, res) => {
   }
 });
 
-app.patch('/api/users/:id', async (req, res) => {
-  try {
-    await dbReady;
-    const id = normalizeId(req.params.id);
-    if (!id) return res.status(400).json({ error: '无效用户 ID' });
-    res.json(upsertUser({ ...(req.body || {}), id }));
-  } catch (e) {
-    console.error('[api] user update failed:', e);
-    res.status(500).json({ error: '用户资料保存失败' });
-  }
-});
+// 注：早期曾提供 PATCH /api/users/:id 用于 HTTP 直改资料，但无登录系统下无法校验请求者身份，
+// 任何拿到 userId 的人都能改他人昵称/头像，属安全漏洞，已移除。资料修改统一走带房间会话鉴权的
+// socket 事件 `user:profile`（服务端校验 socket 对应的 userId），不再暴露无鉴权的 HTTP 写入入口。
 
-// 密码哈希（SHA-256(salt=userId || plain)）。这是"无登录"系统下的轻量防误占，不是强鉴权。
-// 服务端只用它防止陌生人靠重名直接拿走设了密码的账号。
-function hashUserPassword(userId, plain) {
+// 密码哈希（SHA-256(salt :: userId :: plain)，每用户随机 salt）。这是"无登录"系统下的轻量防误占，不是强鉴权。
+// 设计取舍：未设密码的账号，凭昵称即可被同设备召回（符合"无登录"体验）；设了密码的账号，必须校验密码。
+// 由于系统无服务端会话，这里的"你是谁"只能由客户端自报 userId —— 因此 userId 应视为弱机密，不应在普通接口里外泄。
+function hashUserPassword(userId, plain, salt = '') {
   const p = String(plain || '');
-  if (!p) return '';
-  return crypto.createHash('sha256').update(`${userId}::${p}`).digest('hex');
+  if (!salt && !p) return '';
+  return crypto.createHash('sha256').update(`${salt}::${userId}::${p}`).digest('hex');
+}
+
+// 恒定时间比较，避免时序侧信道；空密码账号返回 true（允许凭昵称召回）
+function verifyUserPassword(row, plain) {
+  const stored = String((row && row.password) || '');
+  if (!stored) return true;
+  const salt = String((row && row.password_salt) || '');
+  const hash = hashUserPassword(row.id, plain, salt);
+  const a = Buffer.from(hash, 'hex');
+  const b = Buffer.from(stored, 'hex');
+  if (a.length !== b.length) return false;
+  try { return crypto.timingSafeEqual(a, b); } catch (e) { return false; }
 }
 
 // 按昵称查询账号候选（用于"昵称召回"）。返回尽量少的信息：id/昵称/头像颜色/是否设了密码/更新时间。
@@ -429,11 +442,8 @@ app.post('/api/users/reclaim', async (req, res) => {
     if (!id) return res.status(400).json({ error: '无效用户 ID' });
     const row = dbGet('SELECT * FROM users WHERE id = ?', [id]);
     if (!row) return res.status(404).json({ error: '账号不存在' });
-    const stored = String(row.password || '');
-    if (stored) {
-      const input = String((req.body || {}).password || '');
-      const hash = hashUserPassword(id, input);
-      if (hash !== stored) return res.status(403).json({ error: '密码不正确', passwordRequired: true });
+    if (!verifyUserPassword(row, String((req.body || {}).password || ''))) {
+      return res.status(403).json({ error: '密码不正确', passwordRequired: true });
     }
     // 召回时刷新 updated_at，便于下一次 lookup 把它排到最前面
     dbRun('UPDATE users SET updated_at = ? WHERE id = ?', [Date.now(), id]);
@@ -455,14 +465,25 @@ app.post('/api/users/:id/password', async (req, res) => {
     const body = req.body || {};
     const currentUserId = normalizeId(body.currentUserId);
     if (!currentUserId || currentUserId !== id) return res.status(403).json({ error: '只能为自己的账号设置密码' });
-    const row = dbGet('SELECT id FROM users WHERE id = ?', [id]);
+    const row = dbGet('SELECT id, password, password_salt FROM users WHERE id = ?', [id]);
     if (!row) return res.status(404).json({ error: '账号不存在' });
     const plain = String(body.password || '').slice(0, 128);
+    // 修改已有密码时，必须先验证旧密码（防止他人凭泄露的 userId 覆盖你的密码）
+    if (row.password && !verifyUserPassword(row, String(body.oldPassword || ''))) {
+      return res.status(403).json({ error: '原密码不正确' });
+    }
     if (plain && plain.length < 4) return res.status(400).json({ error: '密码至少 4 位' });
-    const hash = hashUserPassword(id, plain);
-    dbRun('UPDATE users SET password = ?, updated_at = ? WHERE id = ?', [hash, Date.now(), id]);
+    if (!plain) {
+      // 清空密码：账号回到"凭昵称即可召回"状态
+      dbRun('UPDATE users SET password = ?, password_salt = ?, updated_at = ? WHERE id = ?', ['', '', Date.now(), id]);
+      schedulePersist();
+      return res.json({ ok: true, hasPassword: false });
+    }
+    const salt = crypto.randomBytes(12).toString('hex');
+    const hash = hashUserPassword(id, plain, salt);
+    dbRun('UPDATE users SET password = ?, password_salt = ?, updated_at = ? WHERE id = ?', [hash, salt, Date.now(), id]);
     schedulePersist();
-    res.json({ ok: true, hasPassword: !!hash });
+    res.json({ ok: true, hasPassword: true });
   } catch (e) {
     console.error('[api] password set failed:', e);
     res.status(500).json({ error: '设置密码失败' });
@@ -587,8 +608,20 @@ const BILI_QN = {
 const biliCache = new Map(); // bvid -> { ts, data }
 const ROOM_EMPTY_TTL_MS = Number(process.env.ROOM_EMPTY_TTL_MS) || 5 * 60 * 1000;
 
+// 带超时与 UA 的 fetch：B 站接口/媒体现在可能卡死，统一加 AbortController 兜底
+const FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS) || 12000;
+async function fetchWithTimeout(url, opts = {}, timeout = FETCH_TIMEOUT_MS) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeout);
+  try {
+    return await fetch(url, { ...opts, signal: ac.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function biliGet(url) {
-  const r = await fetch(url, { headers: { 'User-Agent': BILI_UA, Referer: 'https://www.bilibili.com' } });
+  const r = await fetchWithTimeout(url, { headers: { 'User-Agent': BILI_UA, Referer: 'https://www.bilibili.com' } });
   return r.json();
 }
 
@@ -730,9 +763,11 @@ app.get('/api/bili-media', async (req, res) => {
   };
   if (req.headers.range) fwd['Range'] = req.headers.range;
   try {
-    const r = await fetch(url, { headers: fwd, redirect: 'follow' });
+    const r = await fetchWithTimeout(url, { headers: fwd, redirect: 'follow' });
     res.status(r.status);
-    const pass = ['content-range', 'content-length', 'accept-ranges', 'content-encoding'];
+    // 注意：fetch 已自动解压响应体，绝不能透传 content-encoding（否则浏览器会二次解压导致失败）。
+    // 我们已在本函数末尾显式设置正确的 content-type，故只透传 Range 相关与长度头。
+    const pass = ['content-range', 'content-length', 'accept-ranges'];
     pass.forEach((h) => { const v = r.headers.get(h); if (v) res.setHeader(h, v); });
     // B 站返回的 m4s 多为 application/octet-stream，浏览器不会当视频/音频解码，强制修正 MIME
     if (kind === 'audio') res.setHeader('content-type', 'audio/mp4');
@@ -914,14 +949,23 @@ io.on('connection', (socket) => {
   // ---------- 密钥协商中转（服务端只转发公钥/加密信封，不接触群密钥明文） ----------
   socket.on('crypto:pubkey', ({ pubKey }) => {
     const room = rooms.get(currentRoom);
-    if (!room || !pubKey) return;
+    // 限制公钥长度（P-256 原始公钥 base64 约 88 字符，留足余量），防止超大负载广播打满房间带宽
+    if (!room || typeof pubKey !== 'string' || pubKey.length > 2048) return;
     // 转发给房间内其他人；持有群密钥者（房主）会回应
     socket.to(currentRoom).emit('crypto:pubkey', { fromId: socket.id, pubKey });
   });
   socket.on('crypto:groupkey', ({ toId, pubKey, env }) => {
     const room = rooms.get(currentRoom);
-    if (!room || !toId || !env) return;
+    if (!room || !toId || !env || typeof env !== 'object') return;
+    if (typeof env.iv !== 'string' || env.iv.length > 256 || typeof env.ct !== 'string' || env.ct.length > 8192) return;
     io.to(toId).emit('crypto:groupkey', { fromId: socket.id, pubKey, env });
+  });
+  // 房主变更后重新协商群密钥：新房主生成新群密钥并广播 rekey，房间内其他人收到后重新发出自己的公钥，
+  // 由新房主用新群密钥包裹回传。避免"房主离开后新成员拿不到群密钥"的问题。
+  socket.on('crypto:rekey', () => {
+    const room = rooms.get(currentRoom);
+    if (!room) return;
+    socket.to(currentRoom).emit('crypto:rekey', { fromId: socket.id });
   });
 
   // ---------- 聊天（服务端只转发密文，不解析明文） ----------
@@ -1025,11 +1069,18 @@ io.on('connection', (socket) => {
   });
 
   socket.on('rtc:signal', ({ to, data }) => {
+    const room = rooms.get(currentRoom);
+    if (!room || !to) return;
+    // 只转发给同处本房间的目标，避免信令被投递到任意 socketId（跨房间串扰）
+    const target = io.sockets.sockets.get(to);
+    if (!target || !target.rooms.has(currentRoom)) return;
     io.to(to).emit('rtc:signal', { from: socket.id, data });
   });
 
   function closePeerAll() {
     socket.to(currentRoom).emit('user:audio', { id: socket.id, enabled: false });
+    // 通知房间内其他客户端关闭与本 socket 的 WebRTC 连接，避免对端 PC 句柄泄漏
+    socket.to(currentRoom).emit('rtc:close', { id: socket.id });
   }
 });
 

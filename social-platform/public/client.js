@@ -22,7 +22,6 @@ const THEME_OPTIONS = [
   { value: 'cinema', label: '影院' },
 ];
 const DEFAULT_THEME = 'midnight';
-const PROFILE_COLORS = ['#6366f1', '#14b8a6', '#f43f5e', '#f59e0b', '#22c55e', '#0ea5e9', '#a855f7'];
 const savedSettings = loadSettings();
 const initialInviteRoom = parseInviteRoomFromUrl();
 
@@ -108,16 +107,19 @@ function profileColor(seed) {
   let hash = 0;
   const s = String(seed || '');
   for (let i = 0; i < s.length; i++) hash = ((hash << 5) - hash) + s.charCodeAt(i);
-  return PROFILE_COLORS[Math.abs(hash) % PROFILE_COLORS.length];
+  // 与成员列表头像共用 AVATAR_COLORS 色池，保证同一个人头像颜色在资料面板和房间列表里一致
+  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
 }
 
 function renderProfileUi() {
   const name = userProfile.name || myName || '';
+  // 仅接受经服务端校验过的 data:image/... 头像，防止任意字符串注入 CSS url()
+  const safeAvatar = typeof userProfile.avatar === 'string' && /^data:image\/(png|jpeg|jpg|webp|gif);base64,/i.test(userProfile.avatar) ? userProfile.avatar : '';
   const avatarEls = [$('profileAvatar'), $('profileAvatarLarge')].filter(Boolean);
   avatarEls.forEach((el) => {
-    el.textContent = userProfile.avatar ? '' : avatarInitial(name);
-    el.style.background = userProfile.avatar
-      ? `center / cover no-repeat url("${userProfile.avatar}")`
+    el.textContent = safeAvatar ? '' : avatarInitial(name);
+    el.style.background = safeAvatar
+      ? `center / cover no-repeat url("${safeAvatar}")`
       : `linear-gradient(135deg, ${userProfile.avatarColor || profileColor(userProfile.id || name)}, ${profileColor((userProfile.id || name) + '2')})`;
   });
   if ($('profileNamePreview')) $('profileNamePreview').textContent = name || '未设置昵称';
@@ -270,6 +272,18 @@ function escHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// 带超时的 fetch（JSON）。避免网络异常时 lookupInFlight 永久卡 true 而阻塞"创建/加入"按钮。
+async function fetchJsonWithTimeout(url, opts = {}, ms = 8000) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ms);
+  try {
+    const res = await fetch(url, { ...opts, signal: ac.signal });
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function currentNameInput() {
   return ($('userName') ? $('userName').value : '').trim();
 }
@@ -312,9 +326,11 @@ async function maybeLookupReclaim() {
   if (!name) { setCreateJoinEnabled(true); return; }
   if (lookupInFlight) return;
   lookupInFlight = true;
+  const queryName = name;
   try {
-    const res = await fetch(`/api/users/lookup?name=${encodeURIComponent(name)}`);
-    const data = await res.json();
+    const data = await fetchJsonWithTimeout(`/api/users/lookup?name=${encodeURIComponent(name)}`);
+    // 昵称一致性：fetch 期间用户可能继续改了昵称，旧请求结果作废，避免按旧昵称错误召回/提示
+    if (currentNameInput() !== queryName) { maybeLookupReclaim(); return; }
     const candidates = (data && data.candidates) || [];
     if (!candidates.length) {
       reclaimResolved = true;               // 新昵称走新建流程
@@ -410,6 +426,7 @@ async function runReclaimForNoPassword() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: c.id, password: '' }),
+      signal: (() => { const a = new AbortController(); setTimeout(() => a.abort(), 8000); return a.signal; })(),
     });
     const data = await res.json();
     if (!res.ok || data.error) {
@@ -438,6 +455,7 @@ async function runReclaimWithPassword() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: c.id, password: pw }),
+      signal: (() => { const a = new AbortController(); setTimeout(() => a.abort(), 8000); return a.signal; })(),
     });
     const data = await res.json();
     if (!res.ok || data.error) {
@@ -712,8 +730,17 @@ function renderEnvStatus() {
 socket.on('connect', () => {
   myId = socket.id;
   renderEnvStatus();
+  // 断线重连：若此前已在房间内（房间视图未隐藏），自动重新加入并恢复房间状态，
+  // 避免停在"幽灵房间"（UI 显示房内但服务端无此会话）。
+  if (currentRoomId && room && !room.classList.contains('hidden')) {
+    socket.emit('room:join', { roomId: currentRoomId, userName: myName, userId: userProfile.id, avatar: userProfile.avatar }, (res) => {
+      if (res && res.user) { persistProfile(res.user); renderProfileUi(); }
+      // room:state 事件会重建成员列表与视频状态；失败（房间已不存在）时由回调提示
+      if (res && res.error) { alert(res.error); }
+    });
+  }
 });
-socket.on('disconnect', renderEnvStatus);
+socket.on('disconnect', () => { renderEnvStatus(); });
 socket.on('connect_error', renderEnvStatus);
 $('roomEnvChip').addEventListener('click', () => {
   const notice = $('roomEnvNotice');
@@ -933,6 +960,10 @@ socket.on('crypto:groupkey', async ({ fromId, pubKey, env }) => {
     appendSystem('🔑 加密通道已建立');
   } catch (e) { console.error('unwrap group key failed', e); }
 });
+// 房主变更后重新协商：新房主广播 rekey，本端收到后重新发出自己的公钥，由新房主用新群密钥包裹回传
+socket.on('crypto:rekey', () => {
+  if (myPubKey) socket.emit('crypto:pubkey', { pubKey: myPubKey });
+});
 
 // ===================================================================
 //  房间状态 & 用户列表
@@ -941,6 +972,9 @@ socket.on('room:state', ({ room, users, video, recentMessages, maxSeq } = {}) =>
   $('roomName').textContent = room.name;
   roomUsers = users;
   roomUsers.forEach((u) => userAudioLevels.set(u.id, u.level || 0));
+  // 清理已不在房间内的用户的电平缓存，避免 Map 无限膨胀
+  const presentIds = new Set(roomUsers.map((u) => u.id));
+  for (const k of userAudioLevels.keys()) if (!presentIds.has(k)) userAudioLevels.delete(k);
   isHost = !!users.find((u) => u.id === socket.id && u.isHost);
   myId = socket.id;
   renderUsers();
@@ -965,9 +999,15 @@ socket.on('room:users', (users) => {
   myId = socket.id;
   roomUsers = users;
   roomUsers.forEach((u) => userAudioLevels.set(u.id, u.level || userAudioLevels.get(u.id) || 0));
+  const wasHost = isHost;
   isHost = !!users.find((u) => u.id === socket.id && u.isHost);
   renderUsers();
   updateRoomHome();
+  // 房主变更后重新协商群密钥：本端刚被推选为房主、但手上还没有群密钥时，生成新群密钥并广播 rekey，
+  // 让房间内其他人重新取回群密钥（避免"房主离开后新成员拿不到群密钥"）
+  if (isHost && !wasHost && !cqCrypto.hasKey()) {
+    cqCrypto.createGroupKey().then(() => socket.emit('crypto:rekey')).catch(() => {});
+  }
 });
 socket.on('user:join', ({ user }) => {
   roomUsers.push(user);
@@ -979,6 +1019,7 @@ socket.on('user:join', ({ user }) => {
 socket.on('user:leave', ({ id }) => {
   const u = roomUsers.find((x) => x.id === id);
   roomUsers = roomUsers.filter((x) => x.id !== id);
+  userAudioLevels.delete(id); // 释放离场用户的电平缓存，避免 Map 无限膨胀
   renderUsers();
   closePeer(id);
   if (u) appendSystem(`「${u.name}」离开了房间`);
@@ -1019,9 +1060,11 @@ function setMemberLevel(id, level) {
 }
 
 function renderMemberAvatar(el, u) {
-  if (u.avatar) {
+  // 仅接受经服务端校验过的 data:image/... 头像，防止任意字符串注入到 CSS url() 造成 XSS
+  const safeAvatar = typeof u.avatar === 'string' && /^data:image\/(png|jpeg|jpg|webp|gif);base64,/i.test(u.avatar) ? u.avatar : '';
+  if (safeAvatar) {
     el.textContent = '';
-    el.style.background = `center / cover no-repeat url("${u.avatar}")`;
+    el.style.background = `center / cover no-repeat url("${safeAvatar}")`;
     return;
   }
   el.textContent = avatarText(u.name);
@@ -1195,6 +1238,7 @@ document.addEventListener('paste', (e) => {
 });
 
 async function sendChat() {
+  if (!currentRoomId) return; // 未进入房间不发送
   const text = $('chatInput').value.trim();
   if (!text && pendingImages.length === 0) return;
   if (!cqCrypto.hasKey()) { alert('加密通道尚未建立，请稍候…'); return; }
@@ -1297,6 +1341,7 @@ function openLightbox(src) {
 
 function appendSystem(text) {
   const box = $('chatMessages');
+  if (!box) return; // 大厅阶段聊天框可能尚未渲染，避免空引用
   const el = document.createElement('div');
   el.className = 'msg system';
   const sp = document.createElement('span');
@@ -1632,9 +1677,10 @@ function showIframeFrame(srcUrl) {
     videoFrame.src = srcUrl;
     videoFrame.style.display = 'block';
   }
-  // 隐藏原生 video，避免占用舞台
+  // 隐藏原生 video，避免占用舞台；同时暂停主视频与音频轨，避免切换 iframe 后原视频在后台继续播放
   const va = $('videoAudio');
   if (va && va.src) { try { va.pause(); va.removeAttribute('src'); va.load(); } catch (e) {} }
+  try { video.pause(); } catch (e) {}
   video.classList.add('iframe-active-host'); // 与原生 video 同住容器；样式钩子在 style.css 可选
   if (videoFrame) videoFrame.classList.remove('hidden');
 }
@@ -1866,16 +1912,16 @@ async function loadBili(bvid, startAt = 0, { forceRefresh = false } = {}) {
   }
 
   // 拉流失败自动重试一次：B 站流地址有时效或被风控/防盗链拦截。
-  // 已是强制刷新重试则不再叠加，避免无限循环。
+  // 已是强制刷新重试则不再叠加，避免无限循环。用 onerror 单次赋值覆盖，避免多次切清晰度时堆叠监听器。
   if (!forceRefresh) {
-    const retryOnError = () => {
+    video.onerror = () => {
       if (!video.error) return;
-      try { video.removeEventListener('error', retryOnError); } catch (e) {}
       $('videoHint').textContent = '视频拉流失败，正在自动重新解析 B 站地址…';
       const resumeAt = video.currentTime || startAt;
       setTimeout(() => loadBili(bvid, resumeAt, { forceRefresh: true }), 400);
     };
-    video.addEventListener('error', retryOnError);
+  } else {
+    video.onerror = null;
   }
 
   const onMeta = () => {
@@ -2181,7 +2227,7 @@ async function toggleMic() {
     updateMicButtons();
     socket.emit('user:audio', { enabled: false });
     socket.emit('user:speaking', { level: 0 });
-    peers.forEach((_, id) => closePeer(id));
+    [...peers.keys()].forEach((id) => closePeer(id));
     stopStream(localStream);
     localStream = null;
     stopLocalMeter();
@@ -2191,7 +2237,7 @@ async function toggleMic() {
 function createPeer(targetId) {
   if (peers.has(targetId)) return peers.get(targetId);
   const pc = new RTCPeerConnection(rtcConfig);
-  const entry = { pc, polite: myId < targetId, makingOffer: false, ignoreOffer: false };
+  const entry = { pc, polite: myId < targetId, makingOffer: false, ignoreOffer: false, remoteSet: false, pendingCandidates: [] };
   if (localStream) localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
   pc.onicecandidate = (e) => { if (e.candidate) socket.emit('rtc:signal', { to: targetId, data: { candidate: e.candidate } }); };
   pc.ontrack = (e) => attachRemote(e.streams[0] || new MediaStream([e.track]), targetId);
@@ -2212,6 +2258,12 @@ async function handleSignal(from, desc) {
   if (entry.ignoreOffer) return;
   try {
     await pc.setRemoteDescription(desc);
+    entry.remoteSet = true;
+    // 在 setRemoteDescription 完成前到达的 ICE candidate 曾静默丢弃，这里补发缓冲队列
+    if (entry.pendingCandidates.length) {
+      for (const c of entry.pendingCandidates) { try { await pc.addIceCandidate(c); } catch (e) { console.error(e); } }
+      entry.pendingCandidates = [];
+    }
     if (desc.type === 'offer') { await pc.setLocalDescription(); socket.emit('rtc:signal', { to: from, data: pc.localDescription }); }
   } catch (err) { console.error(err); }
 }
@@ -2219,7 +2271,10 @@ async function handleSignal(from, desc) {
 socket.on('rtc:signal', async ({ from, data }) => {
   if (data.candidate) {
     const entry = peers.get(from);
-    if (entry) { try { await entry.pc.addIceCandidate(data.candidate); } catch (e) { console.error(e); } }
+    if (entry) {
+      if (entry.remoteSet) { try { await entry.pc.addIceCandidate(data.candidate); } catch (e) { console.error(e); } }
+      else entry.pendingCandidates.push(data.candidate); // 远端描述未就绪，先缓冲
+    }
     return;
   }
   await handleSignal(from, data);
@@ -2230,6 +2285,7 @@ socket.on('user:audio', ({ id, enabled }) => {
     closePeer(id);
   }
 });
+socket.on('rtc:close', ({ id }) => { closePeer(id); });
 socket.on('user:speaking', ({ id, level }) => setMemberLevel(id, level));
 
 function attachRemote(stream, id) {
@@ -2302,8 +2358,9 @@ function fallbackCopy(text, done) {
 }
 function leave() {
   if (!confirm('确定离开房间？')) return;
-  peers.forEach((_, id) => closePeer(id));
+  [...peers.keys()].forEach((id) => closePeer(id));
   if (localStream) { localStream.getTracks().forEach((t) => t.stop()); localStream = null; }
+  stopLocalMeter(); // 停止麦克风试音电平表，避免离开后仍占用音频上下文
   try { socket.disconnect(); } catch (e) {}
   // 关键：跳到根路径，避免留在 /r/ABCDEF 页面被 reload 后因 (initialInviteRoom && myName) 又自动重新加入
   location.href = '/';
