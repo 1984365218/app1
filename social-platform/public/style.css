@@ -2163,3 +2163,58 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
 
 .btn-logout { margin-top: 10px; align-self: stretch; background: transparent; color: var(--danger, #f87171); border: 1px dashed var(--danger, rgba(248,113,113,0.5)); border-radius: 10px; padding: 8px 12px; font-size: 12px; cursor: pointer; }
 .btn-logout:hover { background: rgba(248,113,113,0.08); }
+
+/* ============================================================
+   大厅昵称输入框就近召回提示（#accountHint）
+   设计：与主昵称框同属一个体验，不再单列区块
+   ============================================================ */
+.account-hint {
+  margin: 10px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-soft, rgba(255,255,255,0.04));
+  font-size: 12px;
+  color: var(--text-2, #b9c2d9);
+  line-height: 1.6;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.account-hint.hidden { display: none; }
+.account-hint .ah-tip { display: block; }
+.account-hint .ah-tip.ah-new { color: var(--text-2, #b9c2d9); }
+.account-hint .ah-tip.ah-ok { color: var(--success, #22c55e); }
+.account-hint .ah-tip.ah-err { color: var(--danger, #f87171); }
+.account-hint .ah-tip.ah-pwd, .account-hint .ah-tip.ah-multi { color: var(--text, #eef1f8); }
+.account-hint .ah-pwd-row {
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+}
+.account-hint .ah-pwd-row input {
+  flex: 1; min-width: 120px;
+  background: var(--bg-input, rgba(0,0,0,0.25));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text, #eef1f8);
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.account-hint .ah-pwd-ok, .account-hint .ah-new-acct {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card, rgba(255,255,255,0.04));
+  color: var(--text, #eef1f8);
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.account-hint .ah-pwd-ok:hover, .account-hint .ah-new-acct:hover {
+  border-color: var(--border-hover, rgba(255,255,255,0.16));
+  background: var(--bg-card-hover, rgba(255,255,255,0.08));
+}
+.account-hint .ah-pwd-ok { background: var(--action, #6366f1); border-color: transparent; color: #fff; }
+.account-hint .ah-pwd-ok:hover { filter: brightness(1.08); }
+.account-hint .ah-msg { font-size: 11px; color: var(--danger, #f87171); min-height: 14px; }
+.account-hint .ah-list {
+  display: flex; flex-direction: column; gap: 6px;
+}

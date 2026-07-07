@@ -59,24 +59,7 @@
         <input id="joinRoomId" placeholder="输入房间号" maxlength="10" />
         <button id="btnJoin" class="btn-join">加入</button>
       </div>
-      <div class="reclaim-row">
-        <details id="reclaimDetails" class="reclaim-details">
-          <summary>找回旧账号（换电脑/清缓存时用）</summary>
-          <div class="reclaim-body">
-            <p class="reclaim-hint">输入上次用过的昵称，即可召回账号与头像。同名较多时让你选一条；若该账号设了密码，需补密码。</p>
-            <div class="reclaim-input">
-              <input id="reclaimName" placeholder="上次的昵称" maxlength="20" autocomplete="off" />
-              <button id="btnReclaimLookup" class="btn-join" type="button">查找</button>
-            </div>
-            <div id="reclaimCandidates" class="reclaim-candidates hidden"></div>
-            <div id="reclaimPasswordWrap" class="hidden">
-              <input id="reclaimPassword" type="password" placeholder="该账号设置了密码，请输入" maxlength="64" autocomplete="new-password" />
-              <button id="btnReclaimConfirm" class="btn-primary" type="button">召回此账号</button>
-            </div>
-            <p id="reclaimMessage" class="reclaim-message"></p>
-          </div>
-        </details>
-      </div>
+      <div id="accountHint" class="account-hint hidden"></div>
       <div id="envPanel" class="env-panel">
         <div class="env-head">
           <span>环境体检</span>

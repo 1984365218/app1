@@ -234,6 +234,13 @@ initThemeControls();
 persistProfile(userProfile);
 renderProfileUi();
 syncUserProfile({ silent: true });
+
+// 大厅首发：若本机已有保存昵称，就主动 lookup 一次，让旧账号提示自然浮现
+// （已自动入房的情况就不打扰——届时 setTimeout(joinRoom) 已经接管）
+if (myName && !initialInviteRoom) {
+  setTimeout(() => { try { maybeLookupReclaim(); } catch (e) {} }, 0);
+}
+
 $('avatarPick').addEventListener('click', () => $('avatarInput').click());
 $('profileAvatarPick').addEventListener('click', () => $('profileAvatarInput').click());
 $('avatarInput').addEventListener('change', (e) => { readAvatarFile(e.target.files[0]); e.target.value = ''; });
@@ -243,88 +250,189 @@ $('btnProfile').addEventListener('click', () => { renderProfileUi(); $('profileP
 $('profileClose').addEventListener('click', () => $('profilePanel').classList.add('hidden'));
 $('profileSave').addEventListener('click', saveProfileFromPanel);
 
-// ---------- 账号召回（大厅）----------
-// 召回流程：输昵称 → GET /api/users/lookup 拿候选列表 → 候选多时让用户挑；
-// 候选若 hasPassword=true 则补密码 → POST /api/users/reclaim → 拿回完整 profile → 覆盖本地 userId + 资料。
-let reclaimSelectedCandidate = null;
+// ---------- 账号召回（大厅主昵称框就近提示）----------
+// 设计理念：不管新账号旧账号都用同一个 `#userName` 框。
+// 失焦/回车时按当前昵称自动 lookup：
+//   - 0 候选 → 视为新昵称，将创建新账号。
+//   - 1 候选且无密码 → 立即自动召回，切换为旧账号并提示。
+//   - 1 候选且设密码 → 在提示区显示密码框，回填后召回。
+//   - 多候选 → 显示候选列表（头像色 + 最后活跃）让用户选。
+// 召回未完成时创建/加入按钮被禁用，直到用户完成召回或选择"改用新账号"。
+let reclaimCandidate = null;      // 当前选中的候选账号对象
+let reclaimNeedPassword = false;   // 仍需用户填密码
+let reclaimResolved = false;      // 已可进入房间（已召回旧账号、或确认新建账号）
+let reclaimHasMultiple = false;    // 多候选但用户还没选
+let lookupInFlight = false;        // lookup 请求正在进行
+let lastLookupName = '';           // 上次 lookup 用的昵称，避免重复查询
+let reclaimInitialTriggered = false; // 启动时已对已保存昵称跑过一次 lookup
 
-async function lookupReclaimCandidates() {
-  const name = ($('reclaimName') ? $('reclaimName').value : '').trim();
-  const msgEl = $('reclaimMessage');
-  const listEl = $('reclaimCandidates');
-  const pwEl = $('reclaimPasswordWrap');
-  if (msgEl) msgEl.textContent = '';
-  if (!name) { if (listEl) { listEl.innerHTML = ''; listEl.classList.add('hidden'); } if (pwEl) pwEl.classList.add('hidden'); return; }
+function escHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function currentNameInput() {
+  return ($('userName') ? $('userName').value : '').trim();
+}
+
+function showAccountHint(html) {
+  const hint = $('accountHint');
+  if (!hint) return;
+  if (!html) { hint.innerHTML = ''; hint.classList.add('hidden'); return; }
+  hint.innerHTML = html;
+  hint.classList.remove('hidden');
+}
+
+function clearAccountHint() { showAccountHint(''); }
+
+function setCreateJoinEnabled(enabled) {
+  if ($('btnCreate')) $('btnCreate').disabled = !enabled;
+  if ($('btnJoin')) $('btnJoin').disabled = !enabled;
+}
+
+function resetReclaimState() {
+  reclaimCandidate = null;
+  reclaimNeedPassword = false;
+  reclaimResolved = false;
+  reclaimHasMultiple = false;
+}
+
+function hintForNewName(name) {
+  return `<span class="ah-tip ah-new">✨ 没有叫「${escHtml(name)}」的旧账号，将以新账号进入。</span>`;
+}
+
+// 在主昵称框失焦/变化/创建前调用：去服务端 lookup 一次并按候选数走流程
+async function maybeLookupReclaim() {
+  const name = currentNameInput();
+  // 输入发生（清空、变化）时，重置召回状态
+  if (name !== lastLookupName) {
+    resetReclaimState();
+    lastLookupName = name;
+  }
+  clearAccountHint();
+  if (!name) { setCreateJoinEnabled(true); return; }
+  if (lookupInFlight) return;
+  lookupInFlight = true;
   try {
     const res = await fetch(`/api/users/lookup?name=${encodeURIComponent(name)}`);
     const data = await res.json();
     const candidates = (data && data.candidates) || [];
     if (!candidates.length) {
-      if (listEl) { listEl.innerHTML = ''; listEl.classList.add('hidden'); }
-      if (pwEl) pwEl.classList.add('hidden');
-      if (msgEl) msgEl.textContent = `没找到昵称为「${name}」的账号。换个昵称，或在本机直接新建一个。`;
+      reclaimResolved = true;               // 新昵称走新建流程
+      setCreateJoinEnabled(true);
+      showAccountHint(hintForNewName(name));
       return;
     }
     if (candidates.length === 1) {
-      reclaimSelectedCandidate = candidates[0];
-      if (listEl) { listEl.innerHTML = ''; listEl.classList.add('hidden'); }
-      proceedReclaimCandidate();
+      reclaimCandidate = candidates[0];
+      await proceedReclaimForSingle();
     } else {
-      renderReclaimCandidates(candidates);
-      if (pwEl) pwEl.classList.add('hidden');
-      if (msgEl) msgEl.textContent = `找到 ${candidates.length} 个同名账号，请挑一个（看头像颜色和最后活跃时间）：`;
+      renderReclaimCandidatesList(candidates);
     }
   } catch (e) {
-    if (msgEl) msgEl.textContent = '查询失败：' + (e && e.message ? e.message : e);
+    // 网络等异常：放行走新建，不阻塞用户使用
+    reclaimResolved = true;
+    setCreateJoinEnabled(true);
+    showAccountHint(`<span class="ah-tip ah-err">未能查询旧账号（${escHtml((e && e.message) || '网络错误')}），将以新账号进入。</span>`);
+  } finally {
+    lookupInFlight = false;
   }
 }
 
-function renderReclaimCandidates(list) {
-  const wrap = $('reclaimCandidates');
-  if (!wrap) return;
-  wrap.innerHTML = '';
-  list.forEach((c) => {
-    const row = document.createElement('button');
-    row.type = 'button';
-    row.className = 'reclaim-candidate';
-    const dot = document.createElement('span');
-    dot.className = 'rc-dot';
-    dot.style.background = c.avatarColor || 'transparent';
-    row.appendChild(dot);
-    const meta = document.createElement('span');
-    meta.className = 'rc-meta';
-    meta.textContent = `${c.name}${c.hasPassword ? ' · 🔒 已设密码' : ''} · ${new Date(c.updatedAt).toLocaleString()}`;
-    row.appendChild(meta);
-    row.addEventListener('click', () => {
-      reclaimSelectedCandidate = c;
-      proceedReclaimCandidate();
-    });
-    wrap.appendChild(row);
-  });
-  wrap.classList.remove('hidden');
-}
-
-function proceedReclaimCandidate() {
-  const c = reclaimSelectedCandidate;
-  const pwEl = $('reclaimPasswordWrap');
-  const msgEl = $('reclaimMessage');
+// 单候选：若无需密码立即自动召回；否则显示密码行让用户确认
+async function proceedReclaimForSingle() {
+  const c = reclaimCandidate;
   if (!c) return;
-  if (msgEl) msgEl.textContent = '';
   if (c.hasPassword) {
-    if (pwEl) pwEl.classList.remove('hidden');
-    if ($('reclaimPassword')) $('reclaimPassword').focus();
+    reclaimNeedPassword = true;
+    reclaimResolved = false;
+    setCreateJoinEnabled(false);
+    showAccountHint(`
+      <span class="ah-tip ah-pwd">检测到同名账号已设密码，请输入密码以召回此账号：</span>
+      <div class="ah-pwd-row">
+        <input id="ahPwd" type="password" placeholder="账号密码" autocomplete="off" />
+        <button id="ahPwdOk" class="ah-pwd-ok" type="button">召回</button>
+        <button id="ahNewAcct" class="ah-new-acct" type="button">改用新账号</button>
+      </div>
+      <span id="ahMsg" class="ah-msg"></span>
+    `);
+    const pwdEl = $('ahPwd');
+    if (pwdEl) {
+      pwdEl.focus();
+      pwdEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') runReclaimWithPassword(); });
+    }
+    if ($('ahPwdOk')) $('ahPwdOk').addEventListener('click', runReclaimWithPassword);
+    if ($('ahNewAcct')) $('ahNewAcct').addEventListener('click', () => {
+      resetReclaimState();
+      reclaimResolved = true;
+      setCreateJoinEnabled(true);
+      showAccountHint(hintForNewName(currentNameInput()));
+    });
   } else {
-    if (pwEl) pwEl.classList.add('hidden');
-    confirmReclaim('');
+    await runReclaimForNoPassword();
   }
 }
 
-async function confirmReclaim(passwordOverride) {
-  const c = reclaimSelectedCandidate;
-  const msgEl = $('reclaimMessage');
+function renderReclaimCandidatesList(list) {
+  reclaimHasMultiple = true;
+  reclaimResolved = false;
+  setCreateJoinEnabled(false);
+  let html = `<span class="ah-tip ah-multi">找到 ${list.length} 个同名账号，请挑一个：</span><div class="ah-list">`;
+  list.forEach((c, i) => {
+    html += `<button type="button" class="reclaim-candidate" data-i="${i}">`
+      + `<span class="rc-dot" style="background:${escHtml(c.avatarColor || 'transparent')}"></span>`
+      + `<span class="rc-meta">${escHtml(c.name || '')}${c.hasPassword ? ' · 🔒 已设密码' : ''} · ${new Date(c.updatedAt).toLocaleString()}</span>`
+      + `</button>`;
+  });
+  html += `</div><button id="ahNewAcct" class="ah-new-acct" type="button">改用新账号</button>`;
+  showAccountHint(html);
+  list.forEach((c, i) => {
+    const btn = document.querySelector(`#accountHint .reclaim-candidate[data-i="${i}"]`);
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      reclaimCandidate = c;
+      reclaimHasMultiple = false;
+      await proceedReclaimForSingle();
+    });
+  });
+  if ($('ahNewAcct')) $('ahNewAcct').addEventListener('click', () => {
+    resetReclaimState();
+    reclaimResolved = true;
+    setCreateJoinEnabled(true);
+    showAccountHint(hintForNewName(currentNameInput()));
+  });
+}
+
+async function runReclaimForNoPassword() {
+  const c = reclaimCandidate;
   if (!c) return;
-  const pw = (typeof passwordOverride === 'string') ? passwordOverride
-    : ($('reclaimPassword') ? $('reclaimPassword').value : '');
+  try {
+    const res = await fetch('/api/users/reclaim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: c.id, password: '' }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      showAccountHint(`<span class="ah-tip ah-err">召回失败：${escHtml(data.error || '未知错误')}</span><button id="ahNewAcct" class="ah-new-acct" type="button">改用新账号</button>`);
+      bindNewAccountBtn();
+      setCreateJoinEnabled(false);
+      return;
+    }
+    applyReclaimResult(data);
+    showAccountHint(`<span class="ah-tip ah-ok">✅ 已召回旧账号「${escHtml(data.name || '')}」，本次将使用它进入房间。</span>`);
+  } catch (e) {
+    showAccountHint(`<span class="ah-tip ah-err">召回失败：${escHtml((e && e.message) || '网络错误')}</span><button id="ahNewAcct" class="ah-new-acct" type="button">改用新账号</button>`);
+    bindNewAccountBtn();
+    setCreateJoinEnabled(false);
+  }
+}
+
+async function runReclaimWithPassword() {
+  const c = reclaimCandidate;
+  if (!c) return;
+  const pwdEl = $('ahPwd');
+  const msgEl = $('ahMsg');
+  const pw = pwdEl ? pwdEl.value : '';
   try {
     const res = await fetch('/api/users/reclaim', {
       method: 'POST',
@@ -333,36 +441,79 @@ async function confirmReclaim(passwordOverride) {
     });
     const data = await res.json();
     if (!res.ok || data.error) {
-      if (msgEl) msgEl.textContent = data.error || '召回失败';
+      if (msgEl) msgEl.textContent = data.error || '密码错误或召回失败';
+      setCreateJoinEnabled(false);
       return;
     }
-    // 召回成功：覆盖本地 userId + 资料
-    persistProfile({
-      id: data.id,
-      name: data.name || '',
-      avatar: data.avatar || '',
-      avatarColor: data.avatarColor || '',
-    });
-    myName = data.name || myName;
-    userProfile = {
-      id: data.id,
-      name: data.name,
-      avatar: data.avatar || '',
-      avatarColor: data.avatarColor || '',
-    };
-    renderProfileUi();
-    if (msgEl) msgEl.textContent = `✅ 已召回账号「${data.name}」并切换为本机当前账号。`;
-    if ($('reclaimPasswordWrap')) $('reclaimPasswordWrap').classList.add('hidden');
-    if ($('reclaimPassword')) $('reclaimPassword').value = '';
+    applyReclaimResult(data);
+    showAccountHint(`<span class="ah-tip ah-ok">✅ 密码正确，已召回账号「${escHtml(data.name || '')}」。</span>`);
+    setCreateJoinEnabled(true);
   } catch (e) {
-    if (msgEl) msgEl.textContent = '召回失败：' + (e && e.message ? e.message : e);
+    if (msgEl) msgEl.textContent = '召回失败：' + ((e && e.message) || e);
   }
 }
 
-if ($('btnReclaimLookup')) $('btnReclaimLookup').addEventListener('click', lookupReclaimCandidates);
-if ($('reclaimName')) $('reclaimName').addEventListener('keydown', (e) => { if (e.key === 'Enter') lookupReclaimCandidates(); });
-if ($('btnReclaimConfirm')) $('btnReclaimConfirm').addEventListener('click', () => confirmReclaim());
-if ($('reclaimPassword')) $('reclaimPassword').addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmReclaim(); });
+function bindNewAccountBtn() {
+  const b = $('ahNewAcct');
+  if (b) b.addEventListener('click', () => {
+    resetReclaimState();
+    reclaimResolved = true;
+    setCreateJoinEnabled(true);
+    showAccountHint(hintForNewName(currentNameInput()));
+  });
+}
+
+function applyReclaimResult(data) {
+  // 把本机当前账号完整替换为召回到的旧账号
+  persistProfile({
+    id: data.id,
+    name: data.name || '',
+    avatar: data.avatar || '',
+    avatarColor: data.avatarColor || '',
+  });
+  userProfile = {
+    id: data.id,
+    name: data.name,
+    avatar: data.avatar || '',
+    avatarColor: data.avatarColor || '',
+    hasPassword: !!(data && data.hasPassword),
+  };
+  myName = data.name || myName;
+  if ($('userName')) $('userName').value = userProfile.name; // 召回后昵称以服务端为准
+  reclaimNeedPassword = false;
+  reclaimHasMultiple = false;
+  reclaimResolved = true;
+  setCreateJoinEnabled(true);
+  renderProfileUi();
+  try { renderProfileAccountBox(); } catch (e) {}
+}
+
+// 在创建/加入房间前确保召回已闭环（用户已召回，或确认新建）
+async function ensureReclaimResolved() {
+  const name = currentNameInput();
+  if (!name) return true; // 上层 prepareIdentity 会兜底随机昵称
+  // lookup 尚未触发或正在跑，触发/等待
+  if (lastLookupName !== name) {
+    await maybeLookupReclaim();
+  }
+  // 等待进行中的请求
+  let waited = 0;
+  while (lookupInFlight && waited < 4000) { await new Promise((r) => setTimeout(r, 60)); waited += 60; }
+  if (lookupInFlight) return true; // 超时放行，避免卡死
+  if (!reclaimResolved) {
+    if (reclaimHasMultiple) {
+      alert('找到多个同名账号，请先在大厅提示框中选一个，或点「改用新账号」。');
+      const hint = $('accountHint'); if (hint) hint.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return false;
+    }
+    if (reclaimNeedPassword) {
+      alert('同名账号已设密码，请先在大厅提示框中输入密码完成召回，或点「改用新账号」。');
+      const pwdEl = $('ahPwd'); if (pwdEl) pwdEl.focus();
+      return false;
+    }
+  }
+  return true;
+}
 
 // ---------- 房间内「账号中心」增强 ----------
 function renderProfileAccountBox() {
@@ -673,6 +824,17 @@ function avatarText(name) {
 $('btnCreate').addEventListener('click', createRoom);
 $('btnJoin').addEventListener('click', () => joinRoom($('joinRoomId').value));
 $('joinRoomId').addEventListener('keydown', (e) => { if (e.key === 'Enter') joinRoom($('joinRoomId').value); });
+// 主昵称框失焦时自动触发召回 lookup：让"新账号"和"旧账号"在同一个框里完成
+$('userName').addEventListener('blur', () => { maybeLookupReclaim(); });
+$('userName').addEventListener('input', () => {
+  // 输入变化即清掉旧的召回结果与 UI，重置门禁
+  const name = currentNameInput();
+  if (name !== lastLookupName) {
+    resetReclaimState();
+    clearAccountHint();
+    setCreateJoinEnabled(true);
+  }
+});
 $('userName').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     if (initialInviteRoom) joinRoom(initialInviteRoom);
@@ -695,6 +857,8 @@ async function prepareIdentity({ host = false } = {}) {
 }
 
 async function createRoom() {
+  // 用户从大厅主动创建：先确保召回闭环（已召回旧账号或确认新建）
+  if (!(await ensureReclaimResolved())) return;
   await prepareIdentity({ host: true });
   socket.emit('room:create', { roomName: '', userName: myName, userId: userProfile.id, avatar: userProfile.avatar }, (res) => {
     if (res && res.user) {
@@ -710,6 +874,11 @@ async function createRoom() {
 async function joinRoom(roomId, { auto = false } = {}) {
   const rid = normalizeRoomId(roomId);
   if (!rid) return alert('请输入房间号或打开邀请链接');
+  // 自动入房（点开邀请链接、本机已有 UUID）跳过召回门禁，直接以本机身份进入；
+  // 手动从大厅点击加入则与创建一样走召回闭环。
+  if (!auto) {
+    if (!(await ensureReclaimResolved())) return;
+  }
   await prepareIdentity();
   socket.emit('room:join', { roomId: rid, userName: myName, userId: userProfile.id, avatar: userProfile.avatar }, (res) => {
     if (res && res.user) {
@@ -2135,7 +2304,9 @@ function leave() {
   if (!confirm('确定离开房间？')) return;
   peers.forEach((_, id) => closePeer(id));
   if (localStream) { localStream.getTracks().forEach((t) => t.stop()); localStream = null; }
-  location.reload();
+  try { socket.disconnect(); } catch (e) {}
+  // 关键：跳到根路径，避免留在 /r/ABCDEF 页面被 reload 后因 (initialInviteRoom && myName) 又自动重新加入
+  location.href = '/';
 }
 
 // ===================================================================
