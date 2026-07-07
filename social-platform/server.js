@@ -132,6 +132,10 @@ async function initPersistence() {
     );
     CREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members(user_id);
   `);
+
+  // 兼容旧库：为 users 增列 password（用于"昵称+密码"召回）。空串 = 未设置密码。
+  try { db.run(`ALTER TABLE users ADD COLUMN password TEXT NOT NULL DEFAULT ''`); } catch (e) { /* 列已存在则忽略 */ }
+
   persistDbNow();
   console.log(`[db] SQLite ready: ${DB_PATH}`);
 }
@@ -260,6 +264,7 @@ function publicUser(row) {
     name: row.name,
     avatar: row.avatar || '',
     avatarColor: row.avatar_color || avatarColor(row.id || row.name),
+    hasPassword: !!(row.password && String(row.password).length > 0),
   };
 }
 
@@ -378,6 +383,89 @@ app.patch('/api/users/:id', async (req, res) => {
   } catch (e) {
     console.error('[api] user update failed:', e);
     res.status(500).json({ error: '用户资料保存失败' });
+  }
+});
+
+// 密码哈希（SHA-256(salt=userId || plain)）。这是"无登录"系统下的轻量防误占，不是强鉴权。
+// 服务端只用它防止陌生人靠重名直接拿走设了密码的账号。
+function hashUserPassword(userId, plain) {
+  const p = String(plain || '');
+  if (!p) return '';
+  return crypto.createHash('sha256').update(`${userId}::${p}`).digest('hex');
+}
+
+// 按昵称查询账号候选（用于"昵称召回"）。返回尽量少的信息：id/昵称/头像颜色/是否设了密码/更新时间。
+// 候选按 updated_at 倒序，避免重名时让用户自己挑。
+app.get('/api/users/lookup', async (req, res) => {
+  try {
+    await dbReady;
+    const name = cleanText(req.query.name, '', 40);
+    if (!name) return res.json({ candidates: [] });
+    const rows = dbAll(
+      `SELECT id, name, avatar_color, password, updated_at FROM users WHERE name = ? ORDER BY updated_at DESC LIMIT 12`,
+      [name]
+    );
+    const candidates = rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      avatarColor: r.avatar_color || avatarColor(r.id || r.name),
+      hasAvatar: !!(r.avatar && r.avatar.length > 0),
+      hasPassword: !!(r.password && String(r.password).length > 0),
+      updatedAt: r.updated_at,
+    }));
+    res.json({ candidates });
+  } catch (e) {
+    console.error('[api] user lookup failed:', e);
+    res.status(500).json({ error: '查询失败' });
+  }
+});
+
+// 召回账号：用 userId（来自 lookup）+ 可选密码拿回完整资料（id/name/avatar/avatarColor）。
+// 客户端拿到后用此 id 替换本地 userId，从而"换回账号"。
+app.post('/api/users/reclaim', async (req, res) => {
+  try {
+    await dbReady;
+    const id = normalizeId((req.body || {}).userId);
+    if (!id) return res.status(400).json({ error: '无效用户 ID' });
+    const row = dbGet('SELECT * FROM users WHERE id = ?', [id]);
+    if (!row) return res.status(404).json({ error: '账号不存在' });
+    const stored = String(row.password || '');
+    if (stored) {
+      const input = String((req.body || {}).password || '');
+      const hash = hashUserPassword(id, input);
+      if (hash !== stored) return res.status(403).json({ error: '密码不正确', passwordRequired: true });
+    }
+    // 召回时刷新 updated_at，便于下一次 lookup 把它排到最前面
+    dbRun('UPDATE users SET updated_at = ? WHERE id = ?', [Date.now(), id]);
+    schedulePersist();
+    res.json(publicUser(dbGet('SELECT * FROM users WHERE id = ?', [id])));
+  } catch (e) {
+    console.error('[api] user reclaim failed:', e);
+    res.status(500).json({ error: '召回失败' });
+  }
+});
+
+// 设置/修改/清空自己账号的密码。请求体须带 currentUserId 与本机当前 userId 一致，
+// 否则任何拿到 id 的人都能改密码——这里只挡住"凭空改别人密码"这一最常见误用。
+app.post('/api/users/:id/password', async (req, res) => {
+  try {
+    await dbReady;
+    const id = normalizeId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效用户 ID' });
+    const body = req.body || {};
+    const currentUserId = normalizeId(body.currentUserId);
+    if (!currentUserId || currentUserId !== id) return res.status(403).json({ error: '只能为自己的账号设置密码' });
+    const row = dbGet('SELECT id FROM users WHERE id = ?', [id]);
+    if (!row) return res.status(404).json({ error: '账号不存在' });
+    const plain = String(body.password || '').slice(0, 128);
+    if (plain && plain.length < 4) return res.status(400).json({ error: '密码至少 4 位' });
+    const hash = hashUserPassword(id, plain);
+    dbRun('UPDATE users SET password = ?, updated_at = ? WHERE id = ?', [hash, Date.now(), id]);
+    schedulePersist();
+    res.json({ ok: true, hasPassword: !!hash });
+  } catch (e) {
+    console.error('[api] password set failed:', e);
+    res.status(500).json({ error: '设置密码失败' });
   }
 });
 

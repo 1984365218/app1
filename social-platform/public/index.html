@@ -59,6 +59,24 @@
         <input id="joinRoomId" placeholder="输入房间号" maxlength="10" />
         <button id="btnJoin" class="btn-join">加入</button>
       </div>
+      <div class="reclaim-row">
+        <details id="reclaimDetails" class="reclaim-details">
+          <summary>找回旧账号（换电脑/清缓存时用）</summary>
+          <div class="reclaim-body">
+            <p class="reclaim-hint">输入上次用过的昵称，即可召回账号与头像。同名较多时让你选一条；若该账号设了密码，需补密码。</p>
+            <div class="reclaim-input">
+              <input id="reclaimName" placeholder="上次的昵称" maxlength="20" autocomplete="off" />
+              <button id="btnReclaimLookup" class="btn-join" type="button">查找</button>
+            </div>
+            <div id="reclaimCandidates" class="reclaim-candidates hidden"></div>
+            <div id="reclaimPasswordWrap" class="hidden">
+              <input id="reclaimPassword" type="password" placeholder="该账号设置了密码，请输入" maxlength="64" autocomplete="new-password" />
+              <button id="btnReclaimConfirm" class="btn-primary" type="button">召回此账号</button>
+            </div>
+            <p id="reclaimMessage" class="reclaim-message"></p>
+          </div>
+        </details>
+      </div>
       <div id="envPanel" class="env-panel">
         <div class="env-head">
           <span>环境体检</span>
@@ -85,9 +103,9 @@
         <button id="roomEnvChip" class="env-chip" type="button">环境检测中</button>
       </div>
       <div class="topbar-right">
-        <button id="btnProfile" class="btn-icon" title="个人资料">
+        <button id="btnProfile" class="btn-icon" title="账号中心">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M20 21a8 8 0 0 0-16 0"/></svg>
-          <span>资料</span>
+          <span>账号</span>
         </button>
         <select id="themeSelectRoom" class="theme-select topbar-theme" aria-label="主题风格" title="主题风格"></select>
         <button id="btnMembers" class="btn-icon" title="在线成员">
@@ -374,7 +392,7 @@
     <div id="profilePanel" class="profile-panel hidden">
       <div class="profile-dialog">
         <div class="drawer-head">
-          <span>个人资料</span>
+          <span>账号中心</span>
           <button id="profileClose" class="drawer-close">×</button>
         </div>
         <div class="profile-edit-body">
@@ -386,7 +404,32 @@
             <span>昵称</span>
             <input id="profileNameInput" maxlength="20" autocomplete="off" />
           </label>
+
+          <div class="profile-account-box">
+            <div class="profile-account-row">
+              <span class="profile-row-label">账号 ID</span>
+              <code id="profileAccountId" class="profile-account-id"></code>
+              <button id="btnCopyAccountId" class="btn-sm-wide" type="button">复制</button>
+            </div>
+            <p class="profile-row-hint">账号 ID 自动绑定本浏览器；换设备用「昵称召回」即可找回。</p>
+
+            <div class="profile-account-row">
+              <span class="profile-row-label">密码（可选）</span>
+              <input id="profilePasswordInput" type="password" placeholder="未设置则留空" maxlength="64" autocomplete="new-password" />
+              <button id="btnSavePassword" class="btn-sm-wide" type="button">保存密码</button>
+            </div>
+            <p id="passwordStatus" class="profile-row-hint">未设置密码时，任何人凭你的昵称都能召回此账号——建议给自己起个不太重的昵称，或设个简单密码。</p>
+
+            <div class="profile-divider"></div>
+            <div class="profile-account-row head">
+              <span class="profile-row-label">我去过的房间</span>
+              <button id="btnRefreshMyRooms" class="btn-sm-wide" type="button">刷新</button>
+            </div>
+            <ul id="myRoomsList" class="my-rooms-list"></ul>
+          </div>
+
           <button id="profileSave" class="btn-primary" type="button">保存资料</button>
+          <button id="btnLogoutAccount" class="btn-logout" type="button">在本机退出当前账号</button>
         </div>
       </div>
     </div>

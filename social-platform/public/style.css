@@ -2115,3 +2115,51 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
   .env-checks { grid-template-columns: 1fr; }
   .msg-img { max-width: 180px; max-height: 180px; }
 }
+
+/* ============================================================
+   账号召回 / 账号中心 · 增量样式
+   ============================================================ */
+
+/* 大厅召回入口 */
+.reclaim-row { margin: 14px 0 4px; }
+.reclaim-details { border: 1px solid var(--border); border-radius: var(--r-md, 12px); background: var(--bg-soft, rgba(255,255,255,0.04)); }
+.reclaim-details > summary { cursor: pointer; padding: 10px 14px; font-size: 13px; color: var(--text-2, #b9c2d9); list-style: none; user-select: none; }
+.reclaim-details > summary::-webkit-details-marker { display: none; }
+.reclaim-details > summary::before { content: '▸ '; color: var(--text-3, #7a849c); margin-right: 4px; transition: transform .15s; display: inline-block; }
+.reclaim-details[open] > summary::before { transform: rotate(90deg); }
+.reclaim-body { padding: 4px 14px 14px; }
+.reclaim-hint { margin: 6px 0 10px; font-size: 12px; line-height: 1.6; color: var(--text-3, #7a849c); }
+.reclaim-input { display: flex; gap: 8px; margin-bottom: 8px; }
+.reclaim-input input { flex: 1; }
+.reclaim-candidates { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
+.reclaim-candidate { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-card, rgba(255,255,255,0.04)); color: var(--text, #eef1f8); font-size: 12px; cursor: pointer; text-align: left; }
+.reclaim-candidate:hover { border-color: var(--border-hover, rgba(255,255,255,0.16)); background: var(--bg-card-hover, rgba(255,255,255,0.08)); }
+.reclaim-candidate .rc-dot { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; }
+.reclaim-candidate .rc-meta { flex: 1; line-height: 1.5; }
+#reclaimPasswordWrap { display: flex; gap: 8px; margin-top: 8px; }
+#reclaimPasswordWrap input { flex: 1; }
+.reclaim-message { margin-top: 8px; font-size: 12px; color: var(--text-2, #b9c2d9); min-height: 16px; line-height: 1.5; }
+
+/* 房间内账号中心扩展块 */
+.profile-account-box { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+.profile-account-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.profile-account-row.head { margin-top: 2px; }
+.profile-account-row .profile-row-label { font-size: 12px; color: var(--text-3, #7a849c); min-width: 64px; }
+.profile-account-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--text-2, #b9c2d9); background: var(--bg-input, rgba(0,0,0,0.25)); padding: 4px 8px; border-radius: 6px; flex: 1; word-break: break-all; }
+.profile-row-hint { font-size: 11px; line-height: 1.6; color: var(--text-3, #7a849c); margin: -2px 0 4px; }
+.profile-divider { height: 1px; background: var(--border); margin: 4px 0; }
+.btn-sm-wide { font-size: 12px; padding: 6px 12px; border-radius: 8px; }
+
+.my-rooms-list { list-style: none; padding: 0; margin: 4px 0 0; display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
+.my-rooms-list li.my-rooms-loading, .my-rooms-list li.my-rooms-empty { color: var(--text-3, #7a849c); font-size: 12px; padding: 6px 4px; }
+.my-room-row { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-input, rgba(0,0,0,0.18)); overflow: hidden; }
+.my-room-row.current { border-color: var(--star, rgba(247,170,55,0.6)); }
+.my-room-go { width: 100%; text-align: left; display: flex; gap: 8px; align-items: baseline; padding: 8px 10px; cursor: pointer; background: transparent; border: 0; color: var(--text, #eef1f8); }
+.my-room-go:hover { background: var(--bg-card-hover, rgba(255,255,255,0.06)); }
+.my-room-go .mr-name { font-size: 13px; font-weight: 500; flex: 1; }
+.my-room-go .mr-id { font-size: 11px; color: var(--text-3, #7a849c); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.my-room-go .mr-tag { font-size: 10px; padding: 2px 6px; border-radius: 4px; background: var(--bg-card, rgba(255,255,255,0.08)); color: var(--text-2, #b9c2d9); }
+.mr-time { display: block; padding: 0 10px 6px; font-size: 11px; color: var(--text-3, #7a849c); }
+
+.btn-logout { margin-top: 10px; align-self: stretch; background: transparent; color: var(--danger, #f87171); border: 1px dashed var(--danger, rgba(248,113,113,0.5)); border-radius: 10px; padding: 8px 12px; font-size: 12px; cursor: pointer; }
+.btn-logout:hover { background: rgba(248,113,113,0.08); }

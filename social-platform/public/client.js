@@ -140,6 +140,8 @@ async function syncUserProfile({ silent = true } = {}) {
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || 'profile failed');
     persistProfile(data);
+    userProfile.hasPassword = !!data.hasPassword;
+    try { renderProfileAccountBox(); } catch (e) {}
     myName = data.name;
     renderProfileUi();
     return data;
@@ -240,6 +242,240 @@ $('openProfileLobby').addEventListener('click', () => { renderProfileUi(); $('pr
 $('btnProfile').addEventListener('click', () => { renderProfileUi(); $('profilePanel').classList.remove('hidden'); });
 $('profileClose').addEventListener('click', () => $('profilePanel').classList.add('hidden'));
 $('profileSave').addEventListener('click', saveProfileFromPanel);
+
+// ---------- 账号召回（大厅）----------
+// 召回流程：输昵称 → GET /api/users/lookup 拿候选列表 → 候选多时让用户挑；
+// 候选若 hasPassword=true 则补密码 → POST /api/users/reclaim → 拿回完整 profile → 覆盖本地 userId + 资料。
+let reclaimSelectedCandidate = null;
+
+async function lookupReclaimCandidates() {
+  const name = ($('reclaimName') ? $('reclaimName').value : '').trim();
+  const msgEl = $('reclaimMessage');
+  const listEl = $('reclaimCandidates');
+  const pwEl = $('reclaimPasswordWrap');
+  if (msgEl) msgEl.textContent = '';
+  if (!name) { if (listEl) { listEl.innerHTML = ''; listEl.classList.add('hidden'); } if (pwEl) pwEl.classList.add('hidden'); return; }
+  try {
+    const res = await fetch(`/api/users/lookup?name=${encodeURIComponent(name)}`);
+    const data = await res.json();
+    const candidates = (data && data.candidates) || [];
+    if (!candidates.length) {
+      if (listEl) { listEl.innerHTML = ''; listEl.classList.add('hidden'); }
+      if (pwEl) pwEl.classList.add('hidden');
+      if (msgEl) msgEl.textContent = `没找到昵称为「${name}」的账号。换个昵称，或在本机直接新建一个。`;
+      return;
+    }
+    if (candidates.length === 1) {
+      reclaimSelectedCandidate = candidates[0];
+      if (listEl) { listEl.innerHTML = ''; listEl.classList.add('hidden'); }
+      proceedReclaimCandidate();
+    } else {
+      renderReclaimCandidates(candidates);
+      if (pwEl) pwEl.classList.add('hidden');
+      if (msgEl) msgEl.textContent = `找到 ${candidates.length} 个同名账号，请挑一个（看头像颜色和最后活跃时间）：`;
+    }
+  } catch (e) {
+    if (msgEl) msgEl.textContent = '查询失败：' + (e && e.message ? e.message : e);
+  }
+}
+
+function renderReclaimCandidates(list) {
+  const wrap = $('reclaimCandidates');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  list.forEach((c) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'reclaim-candidate';
+    const dot = document.createElement('span');
+    dot.className = 'rc-dot';
+    dot.style.background = c.avatarColor || 'transparent';
+    row.appendChild(dot);
+    const meta = document.createElement('span');
+    meta.className = 'rc-meta';
+    meta.textContent = `${c.name}${c.hasPassword ? ' · 🔒 已设密码' : ''} · ${new Date(c.updatedAt).toLocaleString()}`;
+    row.appendChild(meta);
+    row.addEventListener('click', () => {
+      reclaimSelectedCandidate = c;
+      proceedReclaimCandidate();
+    });
+    wrap.appendChild(row);
+  });
+  wrap.classList.remove('hidden');
+}
+
+function proceedReclaimCandidate() {
+  const c = reclaimSelectedCandidate;
+  const pwEl = $('reclaimPasswordWrap');
+  const msgEl = $('reclaimMessage');
+  if (!c) return;
+  if (msgEl) msgEl.textContent = '';
+  if (c.hasPassword) {
+    if (pwEl) pwEl.classList.remove('hidden');
+    if ($('reclaimPassword')) $('reclaimPassword').focus();
+  } else {
+    if (pwEl) pwEl.classList.add('hidden');
+    confirmReclaim('');
+  }
+}
+
+async function confirmReclaim(passwordOverride) {
+  const c = reclaimSelectedCandidate;
+  const msgEl = $('reclaimMessage');
+  if (!c) return;
+  const pw = (typeof passwordOverride === 'string') ? passwordOverride
+    : ($('reclaimPassword') ? $('reclaimPassword').value : '');
+  try {
+    const res = await fetch('/api/users/reclaim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: c.id, password: pw }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      if (msgEl) msgEl.textContent = data.error || '召回失败';
+      return;
+    }
+    // 召回成功：覆盖本地 userId + 资料
+    persistProfile({
+      id: data.id,
+      name: data.name || '',
+      avatar: data.avatar || '',
+      avatarColor: data.avatarColor || '',
+    });
+    myName = data.name || myName;
+    userProfile = {
+      id: data.id,
+      name: data.name,
+      avatar: data.avatar || '',
+      avatarColor: data.avatarColor || '',
+    };
+    renderProfileUi();
+    if (msgEl) msgEl.textContent = `✅ 已召回账号「${data.name}」并切换为本机当前账号。`;
+    if ($('reclaimPasswordWrap')) $('reclaimPasswordWrap').classList.add('hidden');
+    if ($('reclaimPassword')) $('reclaimPassword').value = '';
+  } catch (e) {
+    if (msgEl) msgEl.textContent = '召回失败：' + (e && e.message ? e.message : e);
+  }
+}
+
+if ($('btnReclaimLookup')) $('btnReclaimLookup').addEventListener('click', lookupReclaimCandidates);
+if ($('reclaimName')) $('reclaimName').addEventListener('keydown', (e) => { if (e.key === 'Enter') lookupReclaimCandidates(); });
+if ($('btnReclaimConfirm')) $('btnReclaimConfirm').addEventListener('click', () => confirmReclaim());
+if ($('reclaimPassword')) $('reclaimPassword').addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmReclaim(); });
+
+// ---------- 房间内「账号中心」增强 ----------
+function renderProfileAccountBox() {
+  if ($('profileAccountId')) $('profileAccountId').textContent = userProfile.id ? userProfile.id.slice(0, 8) + '…' : '(无)';
+  if ($('passwordStatus')) {
+    // hasPassword 由 syncUserProfile 写到 userProfile.hasPassword
+    const set = !!userProfile.hasPassword;
+    $('passwordStatus').textContent = set
+      ? '已设密码：换设备召回此账号时需要输入密码。'
+      : '未设密码时，任何人都可凭你的昵称召回此账号——建议起个不太重的昵称，或设个简单密码。';
+    if ($('profilePasswordInput')) $('profilePasswordInput').placeholder = set ? '修改密码（留空保存=清空密码）' : '未设置则留空';
+  }
+}
+
+async function saveAccountPassword() {
+  const pwd = $('profilePasswordInput') ? $('profilePasswordInput').value : '';
+  try {
+    const res = await fetch(`/api/users/${encodeURIComponent(userProfile.id)}/password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ currentUserId: userProfile.id, password: pwd }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) { alert(data.error || '密码保存失败'); return; }
+    userProfile.hasPassword = !!data.hasPassword;
+    persistProfile(userProfile);
+    $('profilePasswordInput').value = '';
+    renderProfileAccountBox();
+  } catch (e) {
+    alert('密码保存失败：' + (e && e.message ? e.message : e));
+  }
+}
+
+async function loadMyRooms() {
+  const list = $('myRoomsList');
+  if (!list) return;
+  list.innerHTML = '<li class="my-rooms-loading">加载中…</li>';
+  try {
+    const res = await fetch(`/api/users/${encodeURIComponent(userProfile.id)}/rooms`);
+    const data = await res.json();
+    const rooms = (data && data.rooms) || [];
+    if (!rooms.length) { list.innerHTML = '<li class="my-rooms-empty">还没有去过房间。创建或加入一个房间后，会在这里出现。</li>'; return; }
+    list.innerHTML = '';
+    rooms.forEach((r) => {
+      const li = document.createElement('li');
+      li.className = 'my-room-row' + (r.id === currentRoomId ? ' current' : '');
+      const head = document.createElement('button');
+      head.type = 'button';
+      head.className = 'my-room-go';
+      head.innerHTML = `<span class="mr-name"></span><span class="mr-id"></span><span class="mr-tag"></span>`;
+      head.querySelector('.mr-name').textContent = r.name || '未命名观影房';
+      head.querySelector('.mr-id').textContent = r.id;
+      head.querySelector('.mr-tag').textContent = r.isHost ? '房主' : (r.id === currentRoomId ? '当前' : '成员');
+      head.addEventListener('click', () => {
+        $('profilePanel').classList.add('hidden');
+        if (r.id === currentRoomId) { return; }
+        // 走标准加入流程：填房间号并触发加入
+        if ($('joinRoomId')) $('joinRoomId').value = r.id;
+        if ($('btnJoin')) $('btnJoin').click();
+      });
+      li.appendChild(head);
+      const meta = document.createElement('span');
+      meta.className = 'mr-time';
+      meta.textContent = r.lastSeenAt ? `上次在线：${new Date(r.lastSeenAt).toLocaleString()}` : '';
+      li.appendChild(meta);
+      list.appendChild(li);
+    });
+  } catch (e) {
+    list.innerHTML = '<li class="my-rooms-empty">加载失败：' + (e && e.message ? e.message : e) + '</li>';
+  }
+}
+
+function logoutLocalAccount() {
+  if (!confirm('退出当前账号将清掉本机保存的昵称/头像/账号 ID。下次回来需要重新召回或新建账号。确认退出吗？')) return;
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch (e) {}
+  // 重新初始化本地身份
+  userProfile = {
+    id: createLocalUserId(),
+    name: '',
+    avatar: '',
+    avatarColor: '',
+  };
+  myName = '';
+  savedSettings.userId = userProfile.id;
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(savedSettings)); } catch (e) {}
+  renderProfileUi();
+  if ($('profilePanel')) $('profilePanel').classList.add('hidden');
+  // 回大厅
+  if (lobby && lobby.classList.contains('hidden')) {
+    try { socket.disconnect(); } catch (e) {}
+    location.reload();
+  } else {
+    if ($('userName')) $('userName').value = '';
+    renderProfileUi();
+  }
+}
+
+if ($('btnCopyAccountId')) $('btnCopyAccountId').addEventListener('click', () => {
+  try { navigator.clipboard.writeText(userProfile.id).then(() => { $('btnCopyAccountId').textContent = '已复制'; setTimeout(() => { $('btnCopyAccountId').textContent = '复制'; }, 1200); }); } catch (e) {}
+});
+if ($('btnSavePassword')) $('btnSavePassword').addEventListener('click', saveAccountPassword);
+if ($('btnRefreshMyRooms')) $('btnRefreshMyRooms').addEventListener('click', loadMyRooms);
+if ($('btnLogoutAccount')) $('btnLogoutAccount').addEventListener('click', logoutLocalAccount);
+
+// 打开账号中心时刷新账号信息与房间列表
+$('btnProfile').addEventListener('click', () => {
+  renderProfileUi();
+  renderProfileAccountBox();
+  loadMyRooms();
+  $('profilePanel').classList.remove('hidden');
+});
 function setMobileRoomPanel(panel = 'source') {
   const next = panel === 'audio' ? 'audio' : 'source';
   const side = $('roomSide');
