@@ -2244,3 +2244,16 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
   cursor: pointer; transition: background .15s;
 }
 .btn-destroy:hover { background: rgba(248,113,113,0.1); }
+
+/* 顶栏房间名：房主可点击改名 */
+#roomName.editable { cursor: pointer; border-radius: 4px; padding: 2px 6px; margin-left: 2px; transition: background .15s; }
+#roomName.editable:hover { background: var(--bg-card-hover, rgba(255,255,255,0.08)); }
+#roomName.editable::after { content: ' ✎'; font-size: 12px; opacity: .5; }
+
+/* 我去过的房间列表：房主操作按钮 */
+.my-room-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.mr-ops { display: inline-flex; gap: 4px; flex-shrink: 0; }
+.mr-op { font-size: 11px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text-2, #b9c2d9); cursor: pointer; transition: background .15s, border-color .15s; }
+.mr-op:hover { background: var(--bg-card-hover, rgba(255,255,255,0.08)); border-color: var(--border-hover, rgba(255,255,255,0.16)); }
+.mr-op.mr-delete { color: var(--danger, #f87171); border-color: var(--danger, rgba(248,113,113,0.3)); }
+.mr-op.mr-delete:hover { background: rgba(248,113,113,0.1); }

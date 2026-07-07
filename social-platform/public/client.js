@@ -608,6 +608,53 @@ async function loadMyRooms() {
         if ($('btnJoin')) $('btnJoin').click();
       });
       li.appendChild(head);
+      // 房主行：加「改名」和「删除」操作按钮
+      if (r.isHost) {
+        const ops = document.createElement('span');
+        ops.className = 'mr-ops';
+        const renameBtn = document.createElement('button');
+        renameBtn.type = 'button';
+        renameBtn.className = 'mr-op mr-rename';
+        renameBtn.textContent = '改名';
+        renameBtn.title = '修改房间名';
+        renameBtn.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          const newName = prompt('输入新的房间名：', r.name || '观影房');
+          if (newName === null) return;
+          try {
+            const rr = await fetch(`/api/rooms/${encodeURIComponent(r.id)}/name`, {
+              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ userId: userProfile.id, name: newName.trim() }),
+            });
+            const rd = await rr.json();
+            if (!rr.ok || rd.error) { alert(rd.error || '改名失败'); return; }
+            loadMyRooms(); // 刷新列表
+            // 如果改的是当前房间，顶栏也同步
+            if (r.id === currentRoomId && $('roomName')) $('roomName').textContent = rd.name;
+          } catch (e) { alert('改名失败：' + (e && e.message ? e.message : e)); }
+        });
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'mr-op mr-delete';
+        delBtn.textContent = '删除';
+        delBtn.title = '永久删除房间及其所有聊天记录';
+        delBtn.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          if (!confirm(`确定删除房间「${r.name || r.id}」？\n\n房间内的所有聊天记录和成员记录将被永久清除，无法恢复。`)) return;
+          try {
+            const rr = await fetch(`/api/rooms/${encodeURIComponent(r.id)}`, {
+              method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ userId: userProfile.id }),
+            });
+            const rd = await rr.json();
+            if (!rr.ok || rd.error) { alert(rd.error || '删除失败'); return; }
+            loadMyRooms(); // 刷新列表
+          } catch (e) { alert('删除失败：' + (e && e.message ? e.message : e)); }
+        });
+        ops.appendChild(renameBtn);
+        ops.appendChild(delBtn);
+        li.appendChild(ops);
+      }
       const meta = document.createElement('span');
       meta.className = 'mr-time';
       meta.textContent = r.lastSeenAt ? `上次在线：${new Date(r.lastSeenAt).toLocaleString()}` : '';
@@ -979,6 +1026,8 @@ function enterRoom(roomId, { created = false } = {}) {
   $('btnCopy').title = '复制邀请链接';
   // 房主才显示「删除房间」按钮，room:state 到达后按 isHost 精确切换
   $('btnDestroyRoom').classList.toggle('hidden', !isHost);
+  $('roomName').classList.toggle('editable', isHost);
+  $('roomName').title = isHost ? '点击修改房间名' : '';
   if (history.replaceState) history.replaceState(null, '', `/r/${currentRoomId}`);
   socket.emit('crypto:pubkey', { pubKey: myPubKey });
   appendSystem(`🔒 聊天已端到端加密（ECDH + AES-GCM）`);
@@ -2383,6 +2432,16 @@ $('btnDestroyRoom').addEventListener('click', async () => {
     if (res && res.error) { alert(res.error); return; }
     // 删除成功：room:destroyed 事件会负责清理 UI 并回大厅
   });
+});
+// 房主点击顶栏房间名即可改名（socket 事件，房内实时同步）
+$('roomName').addEventListener('click', () => {
+  if (!currentRoomId || !isHost) return;
+  const old = $('roomName').textContent;
+  const newName = prompt('修改房间名：', old);
+  if (newName === null) return;
+  const trimmed = newName.trim();
+  if (!trimmed || trimmed === old) return;
+  socket.emit('room:rename', { name: trimmed });
 });
 $('btnCopy').addEventListener('click', () => copyInviteLink());
 // 复制文本：优先用 navigator.clipboard（仅安全上下文可用），否则降级到 execCommand（http://IP 明文 context 也可用）

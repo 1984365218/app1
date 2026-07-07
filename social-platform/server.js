@@ -541,6 +541,73 @@ app.get('/api/rooms', async (req, res) => {
   }
 });
 
+// 删除房间（HTTP）：房主可删任意自己创建的房间，包括当前不在内的历史房间。
+// 清除 rooms / messages / room_members 三表 + 内存 Map，并踢出房内在线成员。
+app.delete('/api/rooms/:id', async (req, res) => {
+  try {
+    await dbReady;
+    const rid = normalizeRoomId(req.params.id);
+    if (!rid) return res.status(400).json({ error: '无效房间号' });
+    const row = dbGet('SELECT id, name, host_user_id FROM rooms WHERE id = ?', [rid]);
+    if (!row) return res.status(404).json({ error: '房间不存在' });
+    const requesterId = normalizeId((req.body && (req.body.userId || req.body.hostUserId)) || req.query.userId);
+    if (!requesterId || requesterId !== row.host_user_id) {
+      return res.status(403).json({ error: '只有房主才能删除房间' });
+    }
+    // 通知房内在线成员房间已销毁
+    const liveRoom = rooms.get(rid);
+    if (liveRoom) {
+      if (liveRoom.emptyTimer) { clearTimeout(liveRoom.emptyTimer); liveRoom.emptyTimer = null; }
+      io.to(rid).emit('room:destroyed', { roomId: rid, by: 'http' });
+      for (const sid of [...liveRoom.users.keys()]) {
+        const s = io.sockets.sockets.get(sid);
+        if (s) s.leave(rid);
+      }
+      liveRoom.users.clear();
+      rooms.delete(rid);
+    }
+    try {
+      dbRun('DELETE FROM rooms WHERE id = ?', [rid]);
+      dbRun('DELETE FROM messages WHERE room_id = ?', [rid]);
+      dbRun('DELETE FROM room_members WHERE room_id = ?', [rid]);
+      schedulePersist();
+    } catch (e) { console.error('[api] room delete db cleanup failed:', e); }
+    res.json({ ok: true, name: row.name });
+  } catch (e) {
+    console.error('[api] room delete failed:', e);
+    res.status(500).json({ error: '删除房间失败' });
+  }
+});
+
+// 房主修改房间名（HTTP 版，供不在房间内时改名）
+app.patch('/api/rooms/:id/name', async (req, res) => {
+  try {
+    await dbReady;
+    const rid = normalizeRoomId(req.params.id);
+    if (!rid) return res.status(400).json({ error: '无效房间号' });
+    const row = dbGet('SELECT id, host_user_id FROM rooms WHERE id = ?', [rid]);
+    if (!row) return res.status(404).json({ error: '房间不存在' });
+    const requesterId = normalizeId((req.body && req.body.userId));
+    if (!requesterId || requesterId !== row.host_user_id) {
+      return res.status(403).json({ error: '只有房主才能改名' });
+    }
+    const name = cleanText((req.body && req.body.name) || '', '观影房', 40);
+    dbRun('UPDATE rooms SET name = ?, updated_at = ? WHERE id = ?', [name, Date.now(), rid]);
+    schedulePersist();
+    // 更新内存 + 通知房内在线成员
+    const liveRoom = rooms.get(rid);
+    if (liveRoom) {
+      liveRoom.name = name;
+      liveRoom.updatedAt = Date.now();
+      io.to(rid).emit('room:state', { room: publicRoom(liveRoom) });
+    }
+    res.json({ ok: true, name });
+  } catch (e) {
+    console.error('[api] room rename failed:', e);
+    res.status(500).json({ error: '改名失败' });
+  }
+});
+
 // 拉某个房间的历史密文，按 seq 倒序取分页（即往前拉更早的消息）
 // 用法：fromSeq=最新已收到的 seq；limit=20 → 返回 seq < fromSeq 的最近 20 条（升序）
 app.get('/api/rooms/:id/messages', async (req, res) => {
