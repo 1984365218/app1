@@ -361,6 +361,8 @@ async function maybeLookupReclaim() {
     showAccountHint(`<span class="ah-tip ah-err">未能查询旧账号（${escHtml((e && e.message) || '网络错误')}），将以新账号进入。</span>`);
   } finally {
     lookupInFlight = false;
+    // 召回流程跑完后刷新公开房间列表，让用户看到可选的已有房间
+    if (reclaimResolved) loadPublicRooms();
   }
 }
 
@@ -392,6 +394,7 @@ async function proceedReclaimForSingle() {
       reclaimResolved = true;
       setCreateJoinEnabled(true);
       showAccountHint(hintForNewName(currentNameInput()));
+      loadPublicRooms();
     });
   } else {
     await runReclaimForNoPassword();
@@ -425,6 +428,7 @@ function renderReclaimCandidatesList(list) {
     reclaimResolved = true;
     setCreateJoinEnabled(true);
     showAccountHint(hintForNewName(currentNameInput()));
+    loadPublicRooms();
   });
 }
 
@@ -488,6 +492,7 @@ function bindNewAccountBtn() {
     reclaimResolved = true;
     setCreateJoinEnabled(true);
     showAccountHint(hintForNewName(currentNameInput()));
+    loadPublicRooms();
   });
 }
 
@@ -514,6 +519,7 @@ function applyReclaimResult(data) {
   setCreateJoinEnabled(true);
   renderProfileUi();
   try { renderProfileAccountBox(); } catch (e) {}
+  loadPublicRooms(); // 召回成功后刷新公开房间列表
 }
 
 // 在创建/加入房间前确保召回已闭环（用户已召回，或确认新建）
@@ -675,11 +681,9 @@ async function loadPublicRooms() {
     const res = await fetch('/api/rooms?limit=12');
     const data = await res.json();
     const rooms = (data && data.rooms) || [];
-    // 过滤掉无在线人数且无视频的"僵尸房"，只展示有内容的活跃房间
-    const active = rooms.filter((r) => r.online > 0 || (r.video && (r.video.title || r.video.bili || r.video.url)));
-    if (!active.length) { wrap.classList.add('hidden'); return; }
+    if (!rooms.length) { wrap.classList.add('hidden'); return; }
     list.innerHTML = '';
-    active.forEach((r) => {
+    rooms.forEach((r) => {
       const row = document.createElement('button');
       row.type = 'button';
       row.className = 'pr-row' + (r.id === currentRoomId ? ' current' : '');
@@ -688,7 +692,7 @@ async function loadPublicRooms() {
       row.innerHTML = `<span class="pr-name"></span><span class="pr-video"></span><span class="pr-meta"></span>`;
       row.querySelector('.pr-name').textContent = r.name || '未命名观影房';
       row.querySelector('.pr-video').textContent = vlabel ? `🎬 ${vlabel}` : '';
-      row.querySelector('.pr-meta').textContent = `${online} 人在线 · ${r.id}`;
+      row.querySelector('.pr-meta').textContent = online > 0 ? `${online} 人在线 · ${r.id}` : `无人 · ${r.id}`;
       row.addEventListener('click', () => {
         if (r.id === currentRoomId) return;
         if ($('joinRoomId')) $('joinRoomId').value = r.id;
