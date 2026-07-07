@@ -22,6 +22,12 @@ const THEME_OPTIONS = [
   { value: 'cinema', label: '影院' },
 ];
 const DEFAULT_THEME = 'midnight';
+// 头像颜色池：提前声明，避免 profileColor / avatarColor 在初始化阶段引用时触发 TDZ
+const AVATAR_COLORS = [
+  '#6366f1','#8b5cf6','#a855f7','#d946ef','#ec4899',
+  '#f43f5e','#ef4444','#f97316','#eab308','#22c55e',
+  '#14b8a6','#06b6d4','#0ea5e9','#3b82f6','#64748b',
+];
 const savedSettings = loadSettings();
 const initialInviteRoom = parseInviteRoomFromUrl();
 
@@ -830,11 +836,6 @@ const cqCrypto = (() => {
 })();
 
 // ---------- 头像颜色池 ----------
-const AVATAR_COLORS = [
-  '#6366f1','#8b5cf6','#a855f7','#d946ef','#ec4899',
-  '#f43f5e','#ef4444','#f97316','#eab308','#22c55e',
-  '#14b8a6','#06b6d4','#0ea5e9','#3b82f6','#64748b',
-];
 function avatarColor(seed) {
   let hash = 0;
   for (let i = 0; i < seed.length; i++) hash = ((hash << 5) - hash) + seed.charCodeAt(i);
