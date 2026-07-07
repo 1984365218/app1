@@ -40,7 +40,7 @@ let roomUsers = [];
 let isHost = false;
 let currentBiliQn = savedSettings.biliQn || '720P'; // 当前选中的 B 站清晰度
 
-let videoState = { url: '', fileName: '', bili: '', playing: false, currentTime: 0, lastControllerId: '', lastController: '' };
+let videoState = { url: '', fileName: '', bili: '', kind: '', iframeUrl: '', playing: false, currentTime: 0, lastControllerId: '', lastController: '' };
 let controllerId = '';
 let lastVideoTitle = ''; // 观影模式标题
 let localFileName = '';
@@ -50,13 +50,13 @@ let watchModeOn = false; // 是否处于观影模式（弹幕）
 let danmakuOn = savedSettings.danmakuOn !== false;    // 弹幕开关
 
 let applyingRemote = false; // 正在应用远端指令，避免事件回环
-let dashPlayer = null;      // dash.js 播放器实例（仅 B 站等 DASH 流使用，已弃用，保留占位）
 
 // ---------- WebRTC ----------
 let localStream = null;
 let micOn = false;
 let selectedMicDeviceId = savedSettings.micDeviceId || '';
 let micTestStream = null;
+let micTesting = false; // 是否正在试音（独立于 micTestStream：开麦时复用 localStream 也要靠它判别状态）
 let audioContext = null;
 let localAudioSource = null;
 let localAnalyser = null;
@@ -532,7 +532,7 @@ socket.on('crypto:groupkey', async ({ fromId, pubKey, env }) => {
 // ===================================================================
 //  房间状态 & 用户列表
 // ===================================================================
-socket.on('room:state', ({ room, users, video }) => {
+socket.on('room:state', ({ room, users, video, recentMessages, maxSeq } = {}) => {
   $('roomName').textContent = room.name;
   roomUsers = users;
   roomUsers.forEach((u) => userAudioLevels.set(u.id, u.level || 0));
@@ -543,9 +543,18 @@ socket.on('room:state', ({ room, users, video }) => {
   videoState = { ...videoState, ...video };
   controllerId = video.lastControllerId || '';
   applyVideoState(video, true);
-  if (video.bili || video.url || video.fileName) $('watchLoadPanel').classList.add('hidden');
+  const hasVideoNow = !!(video.bili || video.url || video.fileName || (video.kind === 'iframe' && video.iframeUrl) || (video.kind === 'hls' && video.url));
+  if (hasVideoNow) $('watchLoadPanel').classList.add('hidden');
   updateWatchCta();
   updateRoomHome();
+
+  // 聊天历史：服务端下发最近一批密文。能解则显示明文，不能解（端到端 / 密钥已轮换）显示占位。
+  if (Array.isArray(recentMessages)) {
+    const box = $('chatMessages');
+    if (box) box.innerHTML = '';
+    recentMessages.forEach((m) => insertChatMessage(m, { selfOverride: false, skipScroll: true, skipDanmaku: true }));
+    if (box) box.scrollTop = box.scrollHeight;
+  }
 });
 socket.on('room:users', (users) => {
   myId = socket.id;
@@ -804,13 +813,23 @@ async function sendChat() {
   renderPending();
 }
 
-socket.on('chat:message', async (m) => {
+socket.on('chat:message', async (m) => insertChatMessage(m));
+
+// 通用渲染：实时消息 socket.on('chat:message') 与历史消息 recentMessages 都走这里。
+// m = { user, ts, cipher, seq?, self? }
+// opts:
+//   - selfOverride: 强制左右对齐（历史消息不知道是发送者本人还是别人，按需要传入）
+//   - skipScroll:   连续插入多条时不每次都滚到底（最后再统一滚一次）
+//   - skipDanmaku:  历史消息不当作实时弹幕飘出
+async function insertChatMessage(m, opts = {}) {
   const box = $('chatMessages');
+  if (!box) return;
+  const self = (typeof opts.selfOverride === 'boolean') ? opts.selfOverride : !!m.self;
   const el = document.createElement('div');
-  el.className = 'msg' + (m.self ? ' self' : '');
+  el.className = 'msg' + (self ? ' self' : '');
   const t = new Date(m.ts);
 
-  if (!m.self) {
+  if (!self) {
     const av = document.createElement('div');
     av.className = 'msg-avatar';
     av.style.background = `linear-gradient(135deg, ${avatarColor(m.user || '')}, ${avatarColor(m.user + '_')})`;
@@ -821,7 +840,7 @@ socket.on('chat:message', async (m) => {
   const head = document.createElement('div');
   head.className = 'msg-head';
   head.innerHTML = `<span class="who"></span><span class="time">${pad(t.getHours())}:${pad(t.getMinutes())}</span>`;
-  head.querySelector('.who').textContent = m.user;
+  head.querySelector('.who').textContent = m.user || '匿名';
 
   const body = document.createElement('div');
   body.className = 'msg-body';
@@ -832,11 +851,15 @@ socket.on('chat:message', async (m) => {
   el.appendChild(head);
   el.appendChild(body);
   box.appendChild(el);
-  box.scrollTop = box.scrollHeight;
+  if (!opts.skipScroll) box.scrollTop = box.scrollHeight;
 
   let plain;
   try { plain = await cqCrypto.decrypt(m.cipher); }
-  catch (e) { loading.textContent = '⚠️ 解密失败'; return; }
+  catch (e) {
+    loading.textContent = (opts.skipDanmaku ? '🔒 历史消息（无法解密）' : '⚠️ 解密失败');
+    if (!opts.skipScroll) box.scrollTop = box.scrollHeight;
+    return;
+  }
   let data;
   try { data = JSON.parse(plain); } catch (e) { data = { text: plain }; }
   loading.remove();
@@ -851,14 +874,13 @@ socket.on('chat:message', async (m) => {
     txt.className = 'txt'; txt.textContent = data.text;
     body.appendChild(txt);
   }
-  box.scrollTop = box.scrollHeight;
+  if (!opts.skipScroll) box.scrollTop = box.scrollHeight;
 
-  // 观影模式：以弹幕形式飘出
-  if (watchModeOn) {
+  if (!opts.skipDanmaku && watchModeOn) {
     const dm = data.image && !data.text ? '[图片]' : (data.text || (data.image ? '[图片]' : ''));
     if (dm) spawnDanmaku(dm);
   }
-});
+}
 
 function openLightbox(src) {
   const overlay = $('lightboxOverlay');
@@ -910,7 +932,7 @@ function sourceLabel() {
 }
 
 function hasVideoSource() {
-  return !!(videoState.bili || videoState.url || videoState.fileName);
+  return !!(videoState.bili || videoState.url || videoState.fileName || videoState.kind === 'iframe' || videoState.kind === 'hls');
 }
 
 function updateRoomHome() {
@@ -1086,6 +1108,8 @@ watchStage.addEventListener('mousemove', () => {
 // ===================================================================
 const video = $('video');
 const videoAudio = $('videoAudio');
+let videoFrame = null;
+try { videoFrame = $('videoFrame'); } catch (e) { videoFrame = null; }
 const savedVolume = Number(savedSettings.volume);
 if (Number.isFinite(savedVolume)) {
   const v = Math.min(1, Math.max(0, savedVolume));
@@ -1095,20 +1119,179 @@ if (Number.isFinite(savedVolume)) {
 }
 $('wcDanmaku').classList.toggle('active', danmakuOn);
 
+// 把任意用户输入的视频地址分类为：direct / hls / bili / iframe（YouTube / 腾讯 / 优酷 / 西瓜）
+function classifyVideoUrl(rawUrl) {
+  const url = String(rawUrl || '').trim();
+  if (!url) return { kind: '', url: '' };
+  const testUrl = /^https?:\/\//i.test(url) ? url : `https://${url}`;
+
+  // 1) 显式 HLS / m3u8
+  if (/\.m3u8(\?|#|$)/i.test(testUrl)) return { kind: 'hls', url: testUrl };
+
+  // 2) B 站视频：含 BV 号且 host 是 bilibili/b23
+  {
+    const bv = (url.match(/BV[0-9A-Za-z]+/) || [])[0];
+    if (bv && /bilibili\.com|b23\.tv|bilivideo/i.test(testUrl)) return { kind: 'bili', bvid: bv };
+  }
+
+  // 3) YouTube
+  {
+    let ytId = '';
+    try {
+      const u = new URL(testUrl);
+      const host = u.hostname.replace(/^www\.|^m\./i, '');
+      if (host === 'youtu.be') ytId = u.pathname.slice(1).split('/')[0];
+      else if (host === 'youtube.com' || host === 'youtube-nocookie.com') {
+        if (u.pathname === '/watch') ytId = u.searchParams.get('v') || '';
+        else if (u.pathname.startsWith('/embed/')) ytId = u.pathname.split('/')[2] || '';
+        else if (u.pathname.startsWith('/shorts/')) ytId = u.pathname.split('/')[2] || '';
+      }
+    } catch (e) {}
+    if (ytId) {
+      return {
+        kind: 'iframe', provider: 'youtube', url,
+        embedUrl: `https://www.youtube.com/embed/${ytId}?autoplay=0&modestbranding=1&rel=0&playsinline=1`,
+        title: `YouTube：${ytId}`,
+      };
+    }
+  }
+
+  // 4) 腾讯视频
+  {
+    let vid = '';
+    try {
+      const u = new URL(testUrl);
+      const host = u.hostname.replace(/^www\.|^m\./i, '');
+      if (host === 'v.qq.com') {
+        const m = u.pathname.match(/\/(?:x\/)?(?:cover|page)\/[\w.-]+\/(\w+)\.html/i)
+          || u.pathname.match(/\/(?:x\/)?(?:cover|page)\/(\w+)\.html/i);
+        if (m) vid = m[1];
+        if (!vid) vid = u.searchParams.get('vid') || '';
+      }
+    } catch (e) {}
+    if (vid) {
+      return {
+        kind: 'iframe', provider: 'qq', url,
+        embedUrl: `https://v.qq.com/txp/iframe/player.html?vid=${vid}&autoplay=0`,
+        title: `腾讯视频：${vid}`,
+      };
+    }
+  }
+
+  // 5) 优酷
+  {
+    let yid = '';
+    try {
+      const u = new URL(testUrl);
+      const host = u.hostname.replace(/^www\.|^m\./i, '');
+      if (host === 'v.youku.com' || host === 'player.youku.com') {
+        const m = u.pathname.match(/(?:v_show\/)?(id_[\w=]+)/i)
+          || u.pathname.match(/player\.php\/sid\/([\w=]+)/i);
+        if (m) yid = m[1];
+      }
+    } catch (e) {}
+    if (yid) {
+      return {
+        kind: 'iframe', provider: 'youku', url,
+        embedUrl: `https://player.youku.com/embed/${yid}?autoplay=0`,
+        title: `优酷：${yid}`,
+      };
+    }
+  }
+
+  // 6) 西瓜视频
+  {
+    let xid = '';
+    try {
+      const u = new URL(testUrl);
+      if (/ixigua\.com$/i.test(u.hostname)) {
+        const m = u.pathname.match(/\/(\d+)/);
+        if (m) xid = m[1];
+      }
+    } catch (e) {}
+    if (xid) {
+      return {
+        kind: 'iframe', provider: 'ixigua', url,
+        embedUrl: `https://www.ixigua.com/iframe/${xid}?autoplay=0`,
+        title: `西瓜视频：${xid}`,
+      };
+    }
+  }
+
+  // 7) 默认：交给 <video> 直链尝试解码
+  return { kind: 'direct', url: testUrl };
+}
+
+function showIframeFrame(srcUrl) {
+  if (videoFrame) {
+    videoFrame.src = srcUrl;
+    videoFrame.style.display = 'block';
+  }
+  // 隐藏原生 video，避免占用舞台
+  const va = $('videoAudio');
+  if (va && va.src) { try { va.pause(); va.removeAttribute('src'); va.load(); } catch (e) {} }
+  video.classList.add('iframe-active-host'); // 与原生 video 同住容器；样式钩子在 style.css 可选
+  if (videoFrame) videoFrame.classList.remove('hidden');
+}
+
+function hideIframeFrame() {
+  if (videoFrame && videoFrame.src && videoFrame.src !== 'about:blank') {
+    try { videoFrame.src = 'about:blank'; } catch (e) {}
+  }
+  if (videoFrame) { videoFrame.style.display = 'none'; videoFrame.classList.add('hidden'); }
+  video.classList.remove('iframe-active-host');
+}
+
+function setIframeSource(info) {
+  if (!videoFrame) { alert('当前页面未能初始化嵌入视频框架，请刷新后再试。'); return; }
+  stopDash({ keepLocal: false });
+  lastVideoTitle = info.title || (info.provider ? `${info.provider} 嵌入视频` : '嵌入视频');
+  showIframeFrame(info.embedUrl);
+  $('videoHint').textContent = `嵌入视频：${lastVideoTitle}（播放控制不同步，各自在自己的播放器里看，可一起聊天）`;
+  $('watchTitle').textContent = lastVideoTitle;
+  socket.emit('video:set', { kind: 'iframe', iframeUrl: info.embedUrl, label: lastVideoTitle, iframeProvider: info.provider || '', url: '', bili: '', fileName: '' });
+  $('watchLoadPanel').classList.add('hidden');
+  watchEmpty.classList.add('hidden');
+  updateWatchCta();
+  updateRoomHome();
+}
+
+function setHlsSource(url) {
+  stopDash();
+  hideIframeFrame();
+  // 不引入第三方库：Safari 原生支持 m3u8；其它浏览器尝试用 <video src>，
+  // 浏览器会自己决定能不能解；不支持的视频会触发 error。
+  socket.emit('video:set', { kind: 'hls', url, bili: '', fileName: '', iframeUrl: '' });
+  $('watchLoadPanel').classList.add('hidden');
+  if (video.src !== url) video.src = url;
+  $('videoHint').textContent = '已加载 HLS 直播流（.m3u8）。Safari 原生支持，其它浏览器可能需要更新到最新版 Chrome/Edge。';
+  watchEmpty.classList.add('hidden');
+  updateWatchCta();
+  updateRoomHome();
+}
+
 function setVideoUrlSource(url) {
   url = String(url || '').trim();
   if (!url) return;
+  const info = classifyVideoUrl(url);
+  if (info.kind === 'bili' && info.bvid) { setBiliSource(url); return; }
+  if (info.kind === 'iframe' && info.embedUrl) { setIframeSource(info); return; }
+  if (info.kind === 'hls') { setHlsSource(info.url); return; }
+  // 默认 direct：交给 <video> 直链解码
   stopDash();
-  socket.emit('video:set', { url, fileName: '', bili: '' });
+  hideIframeFrame();
+  socket.emit('video:set', { kind: 'direct', url: info.url, fileName: '', bili: '', iframeUrl: '' });
   $('watchLoadPanel').classList.add('hidden');
-  $('roomVideoUrl').value = url;
+  if ($('roomVideoUrl')) $('roomVideoUrl').value = info.url;
+  lastVideoTitle = info.url;
 }
 
 function setLocalFileSource(file) {
   if (!file) return;
   stopDash();
+  hideIframeFrame();
   useLocalFile(file);
-  socket.emit('video:set', { url: '', fileName: file.name, bili: '' });
+  socket.emit('video:set', { kind: 'file', url: '', fileName: file.name, bili: '', iframeUrl: '' });
   $('watchLoadPanel').classList.add('hidden');
 }
 
@@ -1117,9 +1300,10 @@ function setBiliSource(url) {
   if (!url) return;
   const m = url.match(/BV[0-9A-Za-z]+/);
   if (!m) return alert('请粘贴包含 BV 号的 B 站视频链接');
+  hideIframeFrame();
   $('biliUrl').value = url;
   $('roomBiliUrl').value = url;
-  socket.emit('video:set', { url: '', fileName: '', bili: m[0] });
+  socket.emit('video:set', { kind: 'bili', url: '', fileName: '', bili: m[0], iframeUrl: '' });
   $('watchLoadPanel').classList.add('hidden');
 }
 
@@ -1145,7 +1329,8 @@ $('biliQuality').addEventListener('change', (e) => {
 socket.on('video:state', (v) => {
   videoState = { ...videoState, ...v };
   controllerId = v.lastControllerId || '';
-  if (v.url || v.fileName || v.bili) watchEmpty.classList.add('hidden');
+  const hasAny = !!(v.url || v.fileName || v.bili || (v.kind === 'iframe' && v.iframeUrl) || (v.kind === 'hls' && v.url));
+  if (hasAny) watchEmpty.classList.add('hidden');
   else watchEmpty.classList.remove('hidden');
   $('watchLoadPanel').classList.add('hidden');
   updateWatchCta();
@@ -1154,17 +1339,33 @@ socket.on('video:state', (v) => {
 });
 
 function applyVideoState(v, isInitial) {
-  if (v.bili) {
-    loadBili(v.bili, parseStartAt(v._rawUrl));
+  if (v.kind === 'iframe' && v.iframeUrl) {
+    stopDash({ keepLocal: false });
+    showIframeFrame(v.iframeUrl);
+    lastVideoTitle = v.label || (v.iframeProvider ? `${v.iframeProvider} 嵌入视频` : '嵌入视频');
+    $('watchTitle').textContent = lastVideoTitle;
+    $('videoHint').textContent = `嵌入视频：${lastVideoTitle}（iframe 模式下播放不参与房间同步，可各自在自己窗口里看 + 聊天）`;
+    watchEmpty.classList.add('hidden');
     return;
   }
-  if (v.url) {
+  if (v.kind === 'hls' && v.url) {
     stopDash();
+    hideIframeFrame();
     watchEmpty.classList.add('hidden');
     if (video.src !== v.url) video.src = v.url;
-    $('videoHint').textContent = '已加载视频链接，点击播放即可（所有人进度同步）。';
-  } else if (v.fileName) {
+    $('videoHint').textContent = '已加载 HLS 直播流（.m3u8）。Safari 原生支持，其它浏览器需最新版 Chrome/Edge。';
+    if (typeof v.currentTime === 'number' && Math.abs(video.currentTime - v.currentTime) > 0.5) video.currentTime = v.currentTime;
+    if (v.action === 'load') video.pause();
+    return;
+  }
+  if (v.bili || v.kind === 'bili') {
+    const bvid = v.bili || ((v.url || '').match(/BV[0-9A-Za-z]+/) || [])[0] || '';
+    if (bvid) loadBili(bvid, parseStartAt(v._rawUrl));
+    return;
+  }
+  if (v.kind === 'file' || v.fileName) {
     stopDash({ keepLocal: true });
+    hideIframeFrame();
     watchEmpty.classList.add('hidden');
     if (localFileName === v.fileName && localFileUrl) {
       $('videoHint').textContent = `本机已选择「${v.fileName}」，播放进度会和房间同步。`;
@@ -1174,11 +1375,22 @@ function applyVideoState(v, isInitial) {
       if (isInitial) $('videoHint').textContent = `房间正在使用本地文件「${v.fileName}」。请在本机选择同名文件后再播放。`;
       else $('videoHint').textContent = `有人切换到本地文件「${v.fileName}」。请在本机选择同名文件后再播放。`;
     }
+    if (typeof v.currentTime === 'number' && Math.abs(video.currentTime - v.currentTime) > 0.5) video.currentTime = v.currentTime;
+    if (v.action === 'load') video.pause();
+    return;
   }
-  if (typeof v.currentTime === 'number') {
-    if (Math.abs(video.currentTime - v.currentTime) > 0.5) video.currentTime = v.currentTime;
+  if (v.url || v.kind === 'direct') {
+    stopDash();
+    hideIframeFrame();
+    watchEmpty.classList.add('hidden');
+    if (video.src !== v.url) video.src = v.url;
+    $('videoHint').textContent = '已加载视频链接，点击播放即可（所有人进度同步）。';
+    if (typeof v.currentTime === 'number' && Math.abs(video.currentTime - v.currentTime) > 0.5) video.currentTime = v.currentTime;
+    if (v.action === 'load') video.pause();
+    return;
   }
-  if (v.action === 'load') video.pause();
+  // 没有 source 的情况
+  hideIframeFrame();
 }
 
 function parseStartAt(rawUrl) {
@@ -1206,20 +1418,18 @@ function useLocalFile(file) {
 
 function stopDash({ keepLocal = false } = {}) {
   stopBiliSync();
-  if (dashPlayer) {
-    try { dashPlayer.reset(); } catch (e) {}
-    dashPlayer = null;
-  }
   try { videoAudio.removeAttribute('src'); videoAudio.load(); } catch (e) {}
+  try { hideIframeFrame(); } catch (e) {}
   if (!keepLocal) clearLocalFile();
 }
 
-async function loadBili(bvid, startAt = 0) {
+async function loadBili(bvid, startAt = 0, { forceRefresh = false } = {}) {
   stopDash();
   $('videoHint').textContent = `正在解析视频信息（${currentBiliQn}）…`;
   let data;
   try {
-    const res = await fetch(`/api/resolve-bili?url=${encodeURIComponent(bvid)}&qn=${encodeURIComponent(currentBiliQn)}`);
+    const forceParam = forceRefresh ? '&force=1' : '';
+    const res = await fetch(`/api/resolve-bili?url=${encodeURIComponent(bvid)}&qn=${encodeURIComponent(currentBiliQn)}${forceParam}`);
     data = await res.json();
     if (data.error) throw new Error(data.error);
   } catch (e) {
@@ -1248,6 +1458,19 @@ async function loadBili(bvid, startAt = 0) {
   if (data.audio && data.audio.baseUrl) {
     videoAudio.src = '/api/bili-media?kind=audio&url=' + encodeURIComponent(data.audio.baseUrl);
     startBiliSync();
+  }
+
+  // 拉流失败自动重试一次：B 站流地址有时效或被风控/防盗链拦截。
+  // 已是强制刷新重试则不再叠加，避免无限循环。
+  if (!forceRefresh) {
+    const retryOnError = () => {
+      if (!video.error) return;
+      try { video.removeEventListener('error', retryOnError); } catch (e) {}
+      $('videoHint').textContent = '视频拉流失败，正在自动重新解析 B 站地址…';
+      const resumeAt = video.currentTime || startAt;
+      setTimeout(() => loadBili(bvid, resumeAt, { forceRefresh: true }), 400);
+    };
+    video.addEventListener('error', retryOnError);
   }
 
   const onMeta = () => {
@@ -1422,7 +1645,7 @@ function stopLocalMeter({ keepContext = false } = {}) {
   }
   localAnalyser = null;
   updateMicMeter(0);
-  if (!keepContext && audioContext && !micOn && !micTestStream) {
+  if (!keepContext && audioContext && !micOn && !micTesting) {
     try { audioContext.close(); } catch (e) {}
     audioContext = null;
   }
@@ -1432,7 +1655,7 @@ function updateMicMeter(level) {
   const pct = Math.round(Math.max(0, Math.min(1, level)) * 100);
   if ($('micLevelBar')) $('micLevelBar').style.transform = `scaleX(${Math.max(.03, pct / 100)})`;
   if ($('micLevelBadge')) $('micLevelBadge').textContent = `${pct}%`;
-  if ($('micStatusText')) $('micStatusText').textContent = micOn ? '麦克风已开' : (micTestStream ? '试音中' : '未开麦');
+  if ($('micStatusText')) $('micStatusText').textContent = micOn ? '麦克风已开' : (micTesting ? '试音中' : '未开麦');
 }
 
 function startLocalLevelLoop() {
@@ -1463,14 +1686,16 @@ function stopStream(stream) {
 }
 
 async function toggleMicTest() {
-  if (micTestStream) {
-    stopStream(micTestStream);
-    micTestStream = null;
+  if (micTesting) {
+    // 停止试音
+    micTesting = false;
+    if (micTestStream) { stopStream(micTestStream); micTestStream = null; }
     $('btnTestMic').textContent = '试音';
     if (micOn && localStream) attachLocalMeter(localStream);
     else stopLocalMeter();
     return;
   }
+  // 开启试音
   try {
     if (micOn && localStream) {
       attachLocalMeter(localStream);
@@ -1478,9 +1703,12 @@ async function toggleMicTest() {
       micTestStream = await getSelectedMicStream();
       attachLocalMeter(micTestStream);
     }
+    micTesting = true;
     $('btnTestMic').textContent = '停止试音';
     await refreshMicDevices({ requestLabel: false });
   } catch (err) {
+    micTesting = false;
+    if (micTestStream) { stopStream(micTestStream); micTestStream = null; }
     alert('无法打开这个输入设备：' + (err && err.message ? err.message : err));
   }
 }
@@ -1527,8 +1755,9 @@ async function toggleMic() {
     if (micTestStream) {
       stopStream(micTestStream);
       micTestStream = null;
-      $('btnTestMic').textContent = '试音';
     }
+    micTesting = false;
+    $('btnTestMic').textContent = '试音';
     micOn = true;
     attachLocalMeter(localStream);
     updateRoomHome();

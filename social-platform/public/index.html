@@ -280,6 +280,7 @@
       <div id="watchStage" class="watch-stage">
         <video id="video" playsinline></video>
         <audio id="videoAudio" playsinline></audio>
+        <iframe id="videoFrame" allow="autoplay; encrypted-media; fullscreen" allowfullscreen referrerpolicy="no-referrer" style="border:0;width:100%;height:100%;position:absolute;inset:0;background:#000;display:none"></iframe>
 
         <!-- 弹幕层 -->
         <div id="danmakuLayer" class="danmaku-layer"></div>
@@ -297,7 +298,7 @@
             </div>
           </div>
           <p class="empty-title">还没有共享视频</p>
-          <p class="empty-desc">点右上角「加载」粘贴 B 站链接或选择本地文件，即可和房间里的其他人一起观看，聊天会以弹幕飘过屏幕。</p>
+          <p class="empty-desc">点右上角「加载」粘贴 B 站 / YouTube / 腾讯 / 优酷 / 西瓜 链接，或选择本地文件，即可和房间里的其他人一起观看，聊天会以弹幕飘过屏幕。</p>
           <button id="emptyLoadBtn" class="btn-watch">加载视频</button>
         </div>
 
@@ -317,7 +318,7 @@
           <div class="load-row alt">
             <div class="load-input-wrap">
               <svg class="load-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
-              <input id="videoUrl" placeholder="视频直链 URL…" />
+              <input id="videoUrl" placeholder="任意视频链接 / HLS / 直链 / YouTube / 腾讯 / 优酷 / 西瓜…" />
             </div>
             <button id="btnLoadUrl" class="btn-load">加载</button>
             <span class="sep-text">或</span>
@@ -397,7 +398,6 @@
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/vendor/dash.all.min.js"></script>
   <!-- 纯 JS 版 crypto.subtle 垫片：仅在非安全上下文(http://IP)时启用，使端到端加密可用 -->
   <script src="/vendor/crypto-polyfill.js"></script>
   <script src="/client.js"></script>

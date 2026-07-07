@@ -62,6 +62,10 @@ const DEFAULT_VIDEO = {
   url: '',
   fileName: '',
   bili: '',
+  kind: '',         // direct | bili | hls | iframe | file
+  iframeUrl: '',
+  label: '',
+  iframeProvider: '',
   playing: false,
   currentTime: 0,
   lastControllerId: '',
@@ -99,6 +103,34 @@ async function initPersistence() {
       updated_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_rooms_updated_at ON rooms(updated_at);
+
+    -- 端到端加密聊天历史的存档：服务端只存密文，做"序号 + 分页 + 长度"索引；解密发生在客户端
+    CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      room_id TEXT NOT NULL,
+      user_id TEXT NOT NULL DEFAULT '',
+      user_name TEXT NOT NULL DEFAULT '',
+      cipher TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      length INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_messages_room_seq ON messages(room_id, seq);
+    CREATE INDEX IF NOT EXISTS idx_messages_room_time ON messages(room_id, created_at);
+
+    -- 房间成员关系：记录谁进过哪个房、最后在线时间、是否房主
+    CREATE TABLE IF NOT EXISTS room_members (
+      room_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      display_name TEXT NOT NULL DEFAULT '',
+      is_host INTEGER NOT NULL DEFAULT 0,
+      last_seen_at INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (room_id, user_id),
+      FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members(user_id);
   `);
   persistDbNow();
   console.log(`[db] SQLite ready: ${DB_PATH}`);
@@ -131,6 +163,18 @@ function dbGet(sql, params = []) {
   }
 }
 
+function dbAll(sql, params = []) {
+  const stmt = db.prepare(sql);
+  const rows = [];
+  try {
+    stmt.bind(params);
+    while (stmt.step()) rows.push(stmt.getAsObject());
+    return rows;
+  } finally {
+    stmt.free();
+  }
+}
+
 function dbRun(sql, params = []) {
   const stmt = db.prepare(sql);
   try {
@@ -138,6 +182,45 @@ function dbRun(sql, params = []) {
   } finally {
     stmt.free();
   }
+}
+
+function dbInsert(sql, params = []) {
+  // 用于 INSERT 并取回 last_insert_rowid
+  const stmt = db.prepare(sql);
+  try {
+    stmt.run(params);
+    return db.exec('SELECT last_insert_rowid() AS id')[0].values[0][0];
+  } finally {
+    stmt.free();
+  }
+}
+
+// 房间内聊天 seq 单调计数：缓存到内存 Map + 落 messages 表
+function roomNextSeq(roomId) {
+  if (!roomId) return 1;
+  // 当前 room 已有的最大 seq
+  const last = dbGet('SELECT MAX(seq) AS max_seq FROM messages WHERE room_id = ?', [roomId]);
+  const next = (last && typeof last.max_seq === 'number' && last.max_seq > 0) ? (last.max_seq + 1) : 1;
+  return next;
+}
+
+function saveMessage({ roomId, userId, userName, cipher, seq, createdAt }) {
+  const len = String(cipher || '').length;
+  dbRun(
+    'INSERT INTO messages (room_id, user_id, user_name, cipher, seq, length, created_at) VALUES (?,?,?,?,?,?,?)',
+    [roomId, String(userId || ''), String(userName || ''), String(cipher || ''), seq, len, createdAt]
+  );
+  schedulePersist(800);
+}
+
+function upsertRoomMember({ roomId, userId, displayName, isHost }) {
+  if (!roomId || !userId) return;
+  dbRun(
+    `INSERT INTO room_members (room_id, user_id, display_name, is_host, last_seen_at) VALUES (?,?,?,?,?)
+     ON CONFLICT(room_id, user_id) DO UPDATE SET display_name=excluded.display_name, is_host=MAX(room_members.is_host, excluded.is_host), last_seen_at=excluded.last_seen_at`,
+    [roomId, userId, displayName || '', isHost ? 1 : 0, Date.now()]
+  );
+  schedulePersist(1200);
 }
 
 function normalizeId(value, fallback = '') {
@@ -308,6 +391,96 @@ app.get('/health', async (req, res) => {
   }
 });
 
+// 最近活跃房间列表（按更新时间倒序），含在线人数与当前视频 label。
+// 在线人数来自内存 rooms Map（在线 socketId count），其它字段来自 SQLite。
+app.get('/api/rooms', async (req, res) => {
+  try {
+    await dbReady;
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
+    const rows = dbAll(
+      `SELECT id, name, host_user_id, video_json, created_at, updated_at FROM rooms ORDER BY updated_at DESC LIMIT ?`,
+      [limit]
+    );
+    const out = rows.map((r) => {
+      let vj = {};
+      try { vj = JSON.parse(r.video_json || '{}'); } catch (e) {}
+      const online = (function () {
+        const room = rooms.get(r.id);
+        if (!room) return 0;
+        return room.users.size;
+      })();
+      const label = vj.label || vj.fileName || vj.bili || vj.url || (vj.kind === 'iframe' && vj.iframeUrl) || '';
+      return {
+        id: r.id,
+        name: r.name,
+        hostUserId: r.host_user_id,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+        online,
+        video: {
+          kind: vj.kind || '',
+          title: vj.label || '',
+          bili: vj.bili || '',
+          url: vj.url || '',
+          label,
+        },
+      };
+    });
+    res.json({ rooms: out });
+  } catch (e) {
+    res.status(500).json({ error: 'room list failed' });
+  }
+});
+
+// 拉某个房间的历史密文，按 seq 倒序取分页（即往前拉更早的消息）
+// 用法：fromSeq=最新已收到的 seq；limit=20 → 返回 seq < fromSeq 的最近 20 条（升序）
+app.get('/api/rooms/:id/messages', async (req, res) => {
+  try {
+    await dbReady;
+    const rid = normalizeRoomId(req.params.id);
+    if (!rid) return res.status(400).json({ error: '无效房间号' });
+    const room = loadRoom(rid);
+    if (!room && !roomExists(rid)) return res.status(404).json({ error: '房间不存在' });
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const fromSeq = parseInt(req.query.fromSeq, 10);
+    let rows;
+    if (Number.isFinite(fromSeq) && fromSeq > 0) {
+      rows = dbAll(
+        'SELECT seq, user_name, cipher, created_at FROM messages WHERE room_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?',
+        [rid, fromSeq, limit]
+      );
+    } else {
+      rows = dbAll(
+        'SELECT seq, user_name, cipher, created_at FROM messages WHERE room_id = ? ORDER BY seq DESC LIMIT ?',
+        [rid, limit]
+      );
+    }
+    rows.reverse();
+    const out = rows.map((r) => ({ seq: r.seq, user: r.user_name || '匿名', ts: r.created_at, cipher: r.cipher }));
+    res.json({ messages: out });
+  } catch (e) {
+    res.status(500).json({ error: 'history fetch failed' });
+  }
+});
+
+// 某用户最近去过哪几个房间（基于 room_members.last_seen_at 倒序）
+app.get('/api/users/:id/rooms', async (req, res) => {
+  try {
+    await dbReady;
+    const userId = normalizeId(req.params.id);
+    if (!userId) return res.status(400).json({ error: '无效用户 ID' });
+    const rows = dbAll(
+      `SELECT rm.room_id AS id, rm.display_name, rm.is_host, rm.last_seen_at, r.name, r.updated_at
+       FROM room_members rm LEFT JOIN rooms r ON r.id = rm.room_id
+       WHERE rm.user_id = ? ORDER BY rm.last_seen_at DESC LIMIT 50`,
+      [userId]
+    );
+    res.json({ rooms: rows.map((r) => ({ id: r.id, name: r.name || '', displayName: r.display_name || '', isHost: !!r.is_host, lastSeenAt: r.last_seen_at, updatedAt: r.updated_at })) });
+  } catch (e) {
+    res.status(500).json({ error: 'user rooms failed' });
+  }
+});
+
 // ===================================================================
 //  B 站链接解析（服务端只解析地址，不传输视频；各客户端自行从 B 站 CDN 拉流）
 // ===================================================================
@@ -377,8 +550,9 @@ function biliPickByQn(list, qnLabel) {
   return lower[0] || biliPickBest(list);
 }
 
-async function resolveBili(bvid, qnLabel = '720P') {
+async function resolveBili(bvid, qnLabel = '720P', { force = false } = {}) {
   const cacheKey = `${bvid}@${qnLabel}`;
+  if (force) biliCache.delete(cacheKey);
   const cached = biliCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < 10 * 60 * 1000) return cached.data;
 
@@ -435,10 +609,11 @@ async function resolveBili(bvid, qnLabel = '720P') {
 app.get('/api/resolve-bili', async (req, res) => {
   const url = (req.query.url || '').toString();
   const qn = (req.query.qn || '720P').toString();
+  const force = String(req.query.force || '') === '1' || String(req.query.force || '').toLowerCase() === 'true';
   const m = url.match(/BV[0-9A-Za-z]+/);
   if (!m) return res.status(400).json({ error: '无效的 B 站链接，需包含 BV 号' });
   try {
-    const data = await resolveBili(m[0], qn);
+    const data = await resolveBili(m[0], qn, { force });
     res.json({ bvid: m[0], ...data });
   } catch (e) {
     res.status(502).json({ error: e.message || '解析失败' });
@@ -446,15 +621,19 @@ app.get('/api/resolve-bili', async (req, res) => {
 });
 
 // 媒体代理：绕过 B 站 m4s 防盗链（浏览器直连不会带 Referer），并透传 Range 支持拖动进度
-// B 站 CDN 域名较多（bilivideo / mcdn / akamaized 等），白名单需覆盖全部
-const BILI_MEDIA_HOST = /(^|\.)(bilibili\.com|hdslb\.com|bilivideo\.com|bilivideo\.cn|akamaized\.net)$/i;
+// B 站 CDN 域名较多（bilivideo.com / bilivideo.cn / mcdn.bilivideo.cn / *.hdslb.com / akamaized 系列），白名单需覆盖全部
+function isBiliMediaHost(host) {
+  const h = String(host || '').toLowerCase();
+  const trusted = ['bilivideo.com', 'bilivideo.cn', 'bilibili.com', 'hdslb.com', 'hdslb.net', 'akamaized.net', 'mcdn.bilivideo.cn'];
+  return trusted.some((t) => h === t || h.endsWith('.' + t));
+}
 app.get('/api/bili-media', async (req, res) => {
   const url = (req.query.url || '').toString();
   const kind = (req.query.kind || 'video').toString();
   let parsed;
   try { parsed = new URL(url); } catch (e) { return res.status(400).json({ error: '无效的媒体地址' }); }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return res.status(400).json({ error: '协议不支持' });
-  if (!BILI_MEDIA_HOST.test(parsed.hostname)) return res.status(403).json({ error: '仅允许 B 站媒体地址' });
+  if (!isBiliMediaHost(parsed.hostname)) return res.status(403).json({ error: '仅允许 B 站媒体地址' });
 
   const fwd = {
     'User-Agent': BILI_UA,
@@ -530,6 +709,15 @@ io.on('connection', (socket) => {
       user.isHost = true;
       room.users.set(socket.id, user);
       saveRoom(room, { flushDelay: 0 });
+      upsertRoomMember({ roomId: id, userId: profile.id, displayName: profile.name || '', isHost: true });
+      // 房主新建房间，自身就已经"在房"：补发一份 room:state（含空历史），与 room:join 行为保持一致
+      socket.emit('room:state', {
+        room: publicRoom(room),
+        users: [...room.users.values()],
+        video: room.video,
+        recentMessages: [],
+        maxSeq: 0,
+      });
       if (typeof cb === 'function') cb({ roomId: id, user: profile });
       io.to(id).emit('room:users', [...room.users.values()]);
     } catch (e) {
@@ -554,8 +742,21 @@ io.on('connection', (socket) => {
         saveRoom(room);
       }
       room.users.set(socket.id, user);
+      // 房间成员表落库：用于"谁进过这个房"/"用户最近房间"等扩展
+      upsertRoomMember({ roomId: rid, userId: profile.id, displayName: profile.name || '', isHost: user.isHost });
       socket.to(rid).emit('user:join', { user });
-      socket.emit('room:state', { room: publicRoom(room), users: [...room.users.values()], video: room.video });
+      // 拉取最近 50 条聊天密文交给客户端；解不出密文则按占位渲染（E2E 限制新成员看不到旧明文）
+      const recent = dbAll(
+        'SELECT seq, user_name, cipher, created_at FROM messages WHERE room_id = ? ORDER BY seq DESC LIMIT 50',
+        [rid]
+      ).reverse().map((r) => ({ seq: r.seq, user: r.user_name || '匿名', ts: r.created_at, cipher: r.cipher }));
+      socket.emit('room:state', {
+        room: publicRoom(room),
+        users: [...room.users.values()],
+        video: room.video,
+        recentMessages: recent,
+        maxSeq: recent.length ? recent[recent.length - 1].seq : 0,
+      });
       io.to(currentRoom).emit('room:users', [...room.users.values()]);
       cb && cb({ ok: true, user: profile });
     } catch (e) {
@@ -642,27 +843,44 @@ io.on('connection', (socket) => {
     const u = room.users.get(socket.id);
     // 仅接受加密字段 { cipher }；服务端不接触明文
     if (!payload || typeof payload.cipher !== 'string') return;
+    const cipher = payload.cipher.slice(0, 8 * 1024 * 1024); // 安全上限
+    const seq = roomNextSeq(currentRoom);
+    const ts = Date.now();
+    saveMessage({
+      roomId: currentRoom,
+      userId: u ? u.userId : '',
+      userName: u ? u.name : '匿名',
+      cipher, seq, createdAt: ts,
+    });
     const message = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: `${ts}-${Math.random().toString(36).slice(2, 6)}`,
       user: u ? u.name : '匿名',
-      ts: Date.now(),
-      cipher: payload.cipher.slice(0, 8 * 1024 * 1024), // 安全上限
+      ts,
+      cipher,
+      seq,
     };
     // 转发给房间内其他人：self=false（左侧）
     socket.to(currentRoom).emit('chat:message', { ...message, self: false });
     // 回传给发送者本人：self=true（右侧对齐 + 本地解密渲染）
     socket.emit('chat:message', { ...message, self: true });
-    if (typeof cb === 'function') cb({ ok: true });
+    if (typeof cb === 'function') cb({ ok: true, seq });
   });
 
   // ---------- 视频：加载 ----------
-  socket.on('video:set', ({ url, fileName, bili }) => {
+  socket.on('video:set', (payload) => {
     const room = rooms.get(currentRoom);
     if (!room) return;
+    const str = (v) => (v == null ? '' : String(v));
+    // 默认可由旧字段推断 kind，保持向后兼容
+    const kind = str(payload.kind || (payload.bili ? 'bili' : payload.iframeUrl ? 'iframe' : payload.url ? (payload.url.includes('.m3u8') ? 'hls' : 'direct') : payload.fileName ? 'file' : ''));
     room.video = {
-      url: (url || '').toString(),
-      fileName: (fileName || '').toString(),
-      bili: (bili || '').toString(),
+      url: str(payload.url),
+      fileName: str(payload.fileName),
+      bili: str(payload.bili),
+      kind,
+      iframeUrl: str(payload.iframeUrl),
+      label: str(payload.label),
+      iframeProvider: str(payload.iframeProvider),
       playing: false,
       currentTime: 0,
       updatedAt: Date.now(),
