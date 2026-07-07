@@ -599,7 +599,7 @@ app.patch('/api/rooms/:id/name', async (req, res) => {
     if (liveRoom) {
       liveRoom.name = name;
       liveRoom.updatedAt = Date.now();
-      io.to(rid).emit('room:state', { room: publicRoom(liveRoom) });
+      io.to(rid).emit('room:renamed', { name });
     }
     res.json({ ok: true, name });
   } catch (e) {
@@ -1021,12 +1021,12 @@ io.on('connection', (socket) => {
     if (!u || !u.isHost) { if (typeof cb === 'function') cb({ error: '只有房主才能删除房间' }); return; }
     const rid = currentRoom;
     if (room.emptyTimer) { clearTimeout(room.emptyTimer); room.emptyTimer = null; }
-    // 通知房内所有人房间已销毁，客户端应回大厅
+    // 通知房内所有人房间已销毁，客户端应回大厅（io.to 已覆盖所有在线成员，无需逐个再发）
     io.to(rid).emit('room:destroyed', { roomId: rid, by: socket.id });
     // 让所有客户端 socket 离开 io room，清理内存 users
     for (const sid of [...room.users.keys()]) {
       const s = io.sockets.sockets.get(sid);
-      if (s) { s.leave(rid); if (s !== socket) { try { s.emit('room:destroyed', { roomId: rid, by: socket.id }); } catch (e) {} } }
+      if (s) s.leave(rid);
     }
     room.users.clear();
     rooms.delete(rid);
@@ -1042,15 +1042,17 @@ io.on('connection', (socket) => {
   });
 
   // 房主修改房间名
-  socket.on('room:rename', ({ name }) => {
+  socket.on('room:rename', ({ name }, cb) => {
     const room = rooms.get(currentRoom);
-    if (!room) return;
+    if (!room) { if (typeof cb === 'function') cb({ error: '不在房间内' }); return; }
     const u = room.users.get(socket.id);
-    if (!u || !u.isHost) return;
+    if (!u || !u.isHost) { if (typeof cb === 'function') cb({ error: '只有房主才能改名' }); return; }
     room.name = cleanText(name, room.name, 40);
     room.updatedAt = Date.now();
     saveRoom(room);
-    io.to(currentRoom).emit('room:state', { room: publicRoom(room) });
+    // 用专用事件通知房内所有人房间名已变更（不发 room:state，避免客户端误把部分字段当完整状态处理）
+    io.to(currentRoom).emit('room:renamed', { name: room.name });
+    if (typeof cb === 'function') cb({ ok: true, name: room.name });
   });
 
   // ---------- 密钥协商中转（服务端只转发公钥/加密信封，不接触群密钥明文） ----------

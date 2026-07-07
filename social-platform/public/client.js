@@ -762,6 +762,8 @@ if (initialInviteRoom) {
   $('btnJoin').textContent = '加入邀请';
   $('inviteRoomLabel').textContent = initialInviteRoom;
   $('inviteNotice').classList.remove('hidden');
+  // 邀请链接场景：提示用户输完昵称按回车即可直接加入，不走账号召回流程
+  if ($('userName')) $('userName').placeholder = '输入昵称，按回车即可加入房间';
 }
 
 // ---------- 加密可用性兜底（正常情况 crypto-polyfill.js 已注入 crypto.subtle） ----------
@@ -943,8 +945,10 @@ $('btnCreate').addEventListener('click', createRoom);
 $('btnJoin').addEventListener('click', () => joinRoom($('joinRoomId').value));
 $('joinRoomId').addEventListener('keydown', (e) => { if (e.key === 'Enter') joinRoom($('joinRoomId').value); });
 // 主昵称框失焦时自动触发召回 lookup：让"新账号"和"旧账号"在同一个框里完成
-$('userName').addEventListener('blur', () => { maybeLookupReclaim(); });
+// 但邀请链接场景下不打扰——受邀者只是想进房间，不应该被召回流程卡住
+$('userName').addEventListener('blur', () => { if (!initialInviteRoom) maybeLookupReclaim(); });
 $('userName').addEventListener('input', () => {
+  if (initialInviteRoom) return; // 邀请链接场景不介入召回逻辑
   // 输入变化即清掉旧的召回结果与 UI，重置门禁
   const name = currentNameInput();
   if (name !== lastLookupName) {
@@ -955,7 +959,7 @@ $('userName').addEventListener('input', () => {
 });
 $('userName').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
-    if (initialInviteRoom) joinRoom(initialInviteRoom);
+    if (initialInviteRoom) joinRoom(initialInviteRoom, { auto: true }); // 邀请链接：跳过召回门禁直接进
     else createRoom();
   }
 });
@@ -1138,6 +1142,10 @@ socket.on('room:destroyed', ({ roomId, by }) => {
   if (history.replaceState) history.replaceState(null, '', '/');
   alert(isMe ? '房间已删除。' : '房间已被房主删除，你已返回大厅。');
   loadPublicRooms();
+});
+// 房主改名后，房内所有人收到新房间名同步更新顶栏
+socket.on('room:renamed', ({ name }) => {
+  if (name && $('roomName')) $('roomName').textContent = name;
 });
 
 function audioPrefKey(id) {
@@ -2441,7 +2449,9 @@ $('roomName').addEventListener('click', () => {
   if (newName === null) return;
   const trimmed = newName.trim();
   if (!trimmed || trimmed === old) return;
-  socket.emit('room:rename', { name: trimmed });
+  socket.emit('room:rename', { name: trimmed }, (res) => {
+    if (res && res.error) alert(res.error);
+  });
 });
 $('btnCopy').addEventListener('click', () => copyInviteLink());
 // 复制文本：优先用 navigator.clipboard（仅安全上下文可用），否则降级到 execCommand（http://IP 明文 context 也可用）
