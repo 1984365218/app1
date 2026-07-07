@@ -2136,17 +2136,6 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
 .profile-divider { height: 1px; background: var(--border); margin: 4px 0; }
 .btn-sm-wide { font-size: 12px; padding: 6px 12px; border-radius: 8px; }
 
-.my-rooms-list { list-style: none; padding: 0; margin: 4px 0 0; display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
-.my-rooms-list li.my-rooms-loading, .my-rooms-list li.my-rooms-empty { color: var(--text-3, #7a849c); font-size: 12px; padding: 6px 4px; }
-.my-room-row { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-input, rgba(0,0,0,0.18)); }
-.my-room-row.current { border-color: var(--star, rgba(247,170,55,0.6)); }
-.my-room-go { flex: 1 0 auto; min-width: 0; text-align: left; display: flex; gap: 8px; align-items: baseline; padding: 8px 10px; cursor: pointer; background: transparent; border: 0; color: var(--text, #eef1f8); }
-.my-room-go:hover { background: var(--bg-card-hover, rgba(255,255,255,0.06)); }
-.my-room-go .mr-name { font-size: 13px; font-weight: 500; flex: 1; }
-.my-room-go .mr-id { font-size: 11px; color: var(--text-3, #7a849c); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.my-room-go .mr-tag { font-size: 10px; padding: 2px 6px; border-radius: 4px; background: var(--bg-card, rgba(255,255,255,0.08)); color: var(--text-2, #b9c2d9); }
-.mr-time { flex: 1 0 100%; padding: 0 10px 6px; font-size: 11px; color: var(--text-3, #7a849c); }
-
 .btn-logout { margin-top: 10px; align-self: stretch; background: transparent; color: var(--danger, #f87171); border: 1px dashed var(--danger, rgba(248,113,113,0.5)); border-radius: 10px; padding: 8px 12px; font-size: 12px; cursor: pointer; }
 .btn-logout:hover { background: rgba(248,113,113,0.08); }
 
@@ -2217,21 +2206,33 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
 .account-hint .reclaim-candidate .rc-dot { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; }
 .account-hint .reclaim-candidate .rc-meta { flex: 1; line-height: 1.5; }
 
-/* 大厅公开房间列表 */
+/* 大厅房间列表（统一：展示所有房间，房主行内可改名/删除） */
 .public-rooms { margin-top: 16px; }
 .public-rooms .pr-head { font-size: 12px; color: var(--text-3, #7a849c); margin-bottom: 8px; letter-spacing: .04em; }
 .public-rooms .pr-list { display: flex; flex-direction: column; gap: 6px; }
 .public-rooms .pr-row {
-  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  display: flex; align-items: center; gap: 8px; padding: 0;
   border: 1px solid var(--border); border-radius: var(--r-md, 12px);
-  background: var(--bg-card, rgba(255,255,255,0.04)); color: var(--text, #eef1f8);
-  font-size: 13px; cursor: pointer; text-align: left; transition: border-color .15s, background .15s;
+  background: var(--bg-card, rgba(255,255,255,0.04)); overflow: hidden;
+  transition: border-color .15s, background .15s;
 }
-.public-rooms .pr-row:hover { border-color: var(--border-hover, rgba(255,255,255,0.16)); background: var(--bg-card-hover, rgba(255,255,255,0.08)); }
+.public-rooms .pr-row:hover { border-color: var(--border-hover, rgba(255,255,255,0.16)); }
 .public-rooms .pr-row.current { border-color: var(--accent, #818cf8); }
-.public-rooms .pr-row .pr-name { font-weight: 600; flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.public-rooms .pr-row .pr-video { flex: 1; color: var(--text-2, #b9c2d9); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-.public-rooms .pr-row .pr-meta { font-size: 11px; color: var(--text-3, #7a849c); flex-shrink: 0; }
+.public-rooms .pr-row.mine { border-left: 3px solid var(--star, rgba(247,170,55,.6)); }
+.public-rooms .pr-go {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  background: transparent; border: 0; color: var(--text, #eef1f8); font-size: 13px;
+  cursor: pointer; text-align: left;
+}
+.public-rooms .pr-go:hover { background: var(--bg-card-hover, rgba(255,255,255,0.06)); }
+.public-rooms .pr-go .pr-name { font-weight: 600; flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.public-rooms .pr-go .pr-video { flex: 1; color: var(--text-2, #b9c2d9); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.public-rooms .pr-go .pr-meta { font-size: 11px; color: var(--text-3, #7a849c); flex-shrink: 0; }
+.public-rooms .pr-ops { display: inline-flex; gap: 4px; flex-shrink: 0; padding-right: 8px; }
+.public-rooms .pr-op { font-size: 11px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text-2, #b9c2d9); cursor: pointer; transition: background .15s, border-color .15s; }
+.public-rooms .pr-op:hover { background: var(--bg-card-hover, rgba(255,255,255,0.08)); border-color: var(--border-hover, rgba(255,255,255,0.16)); }
+.public-rooms .pr-op.pr-delete { color: var(--danger, #f87171); border-color: var(--danger, rgba(248,113,113,0.3)); }
+.public-rooms .pr-op.pr-delete:hover { background: rgba(248,113,113,0.1); }
 
 /* 房间名输入框（大厅） */
 #roomNameInput { margin-bottom: 0; }
@@ -2250,10 +2251,3 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
 #roomName.editable:hover { background: var(--bg-card-hover, rgba(255,255,255,0.08)); }
 #roomName.editable::after { content: ' ✎'; font-size: 12px; opacity: .5; }
 
-/* 我去过的房间列表：房主操作按钮 */
-.my-room-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.mr-ops { display: inline-flex; gap: 4px; flex-shrink: 0; }
-.mr-op { font-size: 11px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text-2, #b9c2d9); cursor: pointer; transition: background .15s, border-color .15s; }
-.mr-op:hover { background: var(--bg-card-hover, rgba(255,255,255,0.08)); border-color: var(--border-hover, rgba(255,255,255,0.16)); }
-.mr-op.mr-delete { color: var(--danger, #f87171); border-color: var(--danger, rgba(248,113,113,0.3)); }
-.mr-op.mr-delete:hover { background: rgba(248,113,113,0.1); }

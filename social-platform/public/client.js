@@ -248,10 +248,8 @@ syncUserProfile({ silent: true });
 if (myName && !initialInviteRoom) {
   setTimeout(() => { try { maybeLookupReclaim(); } catch (e) {} }, 0);
 }
-// 大厅加载公开房间列表（非邀请链接场景才展示，避免干扰自动入房）
-if (!initialInviteRoom) {
-  setTimeout(() => { try { loadPublicRooms(); } catch (e) {} }, 200);
-}
+// 公开房间列表不在初始化时无条件加载——只有用户身份确认后（reclaimResolved=true）
+// 才在 maybeLookupReclaim / applyReclaimResult / 改用新账号 回调中刷新，避免未验证就看到房间
 
 $('avatarPick').addEventListener('click', () => $('avatarInput').click());
 $('profileAvatarPick').addEventListener('click', () => $('profileAvatarInput').click());
@@ -586,43 +584,39 @@ async function saveAccountPassword() {
   }
 }
 
-async function loadMyRooms() {
-  const list = $('myRoomsList');
-  if (!list) return;
-  list.innerHTML = '<li class="my-rooms-loading">加载中…</li>';
+// 统一的房间列表（大厅）：展示所有房间，房主可直接在行内改名/删除
+async function loadPublicRooms() {
+  const wrap = $('publicRooms');
+  const list = $('publicRoomsList');
+  if (!wrap || !list) return;
   try {
-    const res = await fetch(`/api/users/${encodeURIComponent(userProfile.id)}/rooms`);
+    const res = await fetch('/api/rooms?limit=20');
     const data = await res.json();
     const rooms = (data && data.rooms) || [];
-    if (!rooms.length) { list.innerHTML = '<li class="my-rooms-empty">还没有去过房间。创建或加入一个房间后，会在这里出现。</li>'; return; }
+    if (!rooms.length) { wrap.classList.add('hidden'); return; }
     list.innerHTML = '';
     rooms.forEach((r) => {
-      const li = document.createElement('li');
-      li.className = 'my-room-row' + (r.id === currentRoomId ? ' current' : '');
-      const head = document.createElement('button');
-      head.type = 'button';
-      head.className = 'my-room-go';
-      head.innerHTML = `<span class="mr-name"></span><span class="mr-id"></span><span class="mr-tag"></span>`;
-      head.querySelector('.mr-name').textContent = r.name || '未命名观影房';
-      head.querySelector('.mr-id').textContent = r.id;
-      head.querySelector('.mr-tag').textContent = r.isHost ? '房主' : (r.id === currentRoomId ? '当前' : '成员');
-      head.addEventListener('click', () => {
-        $('profilePanel').classList.add('hidden');
-        if (r.id === currentRoomId) { return; }
-        // 走标准加入流程：填房间号并触发加入
+      const isMyRoom = r.hostUserId === userProfile.id;
+      const row = document.createElement('div');
+      row.className = 'pr-row' + (r.id === currentRoomId ? ' current' : '') + (isMyRoom ? ' mine' : '');
+      const online = r.online || 0;
+      const vlabel = (r.video && (r.video.title || r.video.label)) || '';
+      row.innerHTML = `<button type="button" class="pr-go"></button><span class="pr-ops"></span>`;
+      const go = row.querySelector('.pr-go');
+      go.innerHTML = `<span class="pr-name"></span><span class="pr-video"></span><span class="pr-meta"></span>`;
+      go.querySelector('.pr-name').textContent = r.name || '未命名观影房';
+      go.querySelector('.pr-video').textContent = vlabel ? `🎬 ${vlabel}` : '';
+      go.querySelector('.pr-meta').textContent = online > 0 ? `${online}人在线 · ${r.id}` : `无人 · ${r.id}`;
+      go.addEventListener('click', () => {
+        if (r.id === currentRoomId) return;
         if ($('joinRoomId')) $('joinRoomId').value = r.id;
         if ($('btnJoin')) $('btnJoin').click();
       });
-      li.appendChild(head);
-      // 房主行：加「改名」和「删除」操作按钮
-      if (r.isHost) {
-        const ops = document.createElement('span');
-        ops.className = 'mr-ops';
+      // 房主行：改名 + 删除
+      const ops = row.querySelector('.pr-ops');
+      if (isMyRoom) {
         const renameBtn = document.createElement('button');
-        renameBtn.type = 'button';
-        renameBtn.className = 'mr-op mr-rename';
-        renameBtn.textContent = '改名';
-        renameBtn.title = '修改房间名';
+        renameBtn.type = 'button'; renameBtn.className = 'pr-op pr-rename'; renameBtn.textContent = '改名';
         renameBtn.addEventListener('click', async (ev) => {
           ev.stopPropagation();
           const newName = prompt('输入新的房间名：', r.name || '观影房');
@@ -634,19 +628,15 @@ async function loadMyRooms() {
             });
             const rd = await rr.json();
             if (!rr.ok || rd.error) { alert(rd.error || '改名失败'); return; }
-            loadMyRooms(); // 刷新列表
-            // 如果改的是当前房间，顶栏也同步
             if (r.id === currentRoomId && $('roomName')) $('roomName').textContent = rd.name;
+            loadPublicRooms();
           } catch (e) { alert('改名失败：' + (e && e.message ? e.message : e)); }
         });
         const delBtn = document.createElement('button');
-        delBtn.type = 'button';
-        delBtn.className = 'mr-op mr-delete';
-        delBtn.textContent = '删除';
-        delBtn.title = '永久删除房间及其所有聊天记录';
+        delBtn.type = 'button'; delBtn.className = 'pr-op pr-delete'; delBtn.textContent = '删除';
         delBtn.addEventListener('click', async (ev) => {
           ev.stopPropagation();
-          if (!confirm(`确定删除房间「${r.name || r.id}」？\n\n房间内的所有聊天记录和成员记录将被永久清除，无法恢复。`)) return;
+          if (!confirm(`确定删除房间「${r.name || r.id}」？\n\n所有聊天记录将被永久清除。`)) return;
           try {
             const rr = await fetch(`/api/rooms/${encodeURIComponent(r.id)}`, {
               method: 'DELETE', headers: { 'Content-Type': 'application/json' },
@@ -654,54 +644,16 @@ async function loadMyRooms() {
             });
             const rd = await rr.json();
             if (!rr.ok || rd.error) { alert(rd.error || '删除失败'); return; }
-            loadMyRooms(); // 刷新列表
+            loadPublicRooms();
           } catch (e) { alert('删除失败：' + (e && e.message ? e.message : e)); }
         });
         ops.appendChild(renameBtn);
         ops.appendChild(delBtn);
-        li.appendChild(ops);
       }
-      const meta = document.createElement('span');
-      meta.className = 'mr-time';
-      meta.textContent = r.lastSeenAt ? `上次在线：${new Date(r.lastSeenAt).toLocaleString()}` : '';
-      li.appendChild(meta);
-      list.appendChild(li);
-    });
-  } catch (e) {
-    list.innerHTML = '<li class="my-rooms-empty">加载失败：' + (e && e.message ? e.message : e) + '</li>';
-  }
-}
-
-// 大厅公开房间列表：展示最近活跃的房间，点击直接加入
-async function loadPublicRooms() {
-  const wrap = $('publicRooms');
-  const list = $('publicRoomsList');
-  if (!wrap || !list) return;
-  try {
-    const res = await fetch('/api/rooms?limit=12');
-    const data = await res.json();
-    const rooms = (data && data.rooms) || [];
-    if (!rooms.length) { wrap.classList.add('hidden'); return; }
-    list.innerHTML = '';
-    rooms.forEach((r) => {
-      const row = document.createElement('button');
-      row.type = 'button';
-      row.className = 'pr-row' + (r.id === currentRoomId ? ' current' : '');
-      const online = r.online || 0;
-      const vlabel = (r.video && (r.video.title || r.video.label)) || '';
-      row.innerHTML = `<span class="pr-name"></span><span class="pr-video"></span><span class="pr-meta"></span>`;
-      row.querySelector('.pr-name').textContent = r.name || '未命名观影房';
-      row.querySelector('.pr-video').textContent = vlabel ? `🎬 ${vlabel}` : '';
-      row.querySelector('.pr-meta').textContent = online > 0 ? `${online} 人在线 · ${r.id}` : `无人 · ${r.id}`;
-      row.addEventListener('click', () => {
-        if (r.id === currentRoomId) return;
-        if ($('joinRoomId')) $('joinRoomId').value = r.id;
-        if ($('btnJoin')) $('btnJoin').click();
-      });
       list.appendChild(row);
     });
     wrap.classList.remove('hidden');
-  } catch (e) { /* 静默失败，不影响大厅使用 */ }
+  } catch (e) { /* 静默失败 */ }
 }
 
 function logoutLocalAccount() {
@@ -735,14 +687,12 @@ if ($('btnCopyAccountId')) $('btnCopyAccountId').addEventListener('click', () =>
   try { navigator.clipboard.writeText(userProfile.id).then(() => { $('btnCopyAccountId').textContent = '已复制'; setTimeout(() => { $('btnCopyAccountId').textContent = '复制'; }, 1200); }); } catch (e) {}
 });
 if ($('btnSavePassword')) $('btnSavePassword').addEventListener('click', saveAccountPassword);
-if ($('btnRefreshMyRooms')) $('btnRefreshMyRooms').addEventListener('click', loadMyRooms);
 if ($('btnLogoutAccount')) $('btnLogoutAccount').addEventListener('click', logoutLocalAccount);
 
-// 打开账号中心时刷新账号信息与房间列表
+// 打开账号中心时刷新账号信息
 $('btnProfile').addEventListener('click', () => {
   renderProfileUi();
   renderProfileAccountBox();
-  loadMyRooms();
   $('profilePanel').classList.remove('hidden');
 });
 function setMobileRoomPanel(panel = 'source') {
