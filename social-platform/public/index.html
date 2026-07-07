@@ -51,6 +51,10 @@
         <div class="input-icon">👤</div>
         <input id="userName" placeholder="取个昵称吧" maxlength="20" autocomplete="off" />
       </div>
+      <div class="form-group">
+        <div class="input-icon">🎬</div>
+        <input id="roomNameInput" placeholder="给房间起个名字（可选）" maxlength="40" autocomplete="off" />
+      </div>
       <button id="btnCreate" class="btn-primary">
         <span>✨</span> 创建房间
       </button>
@@ -58,6 +62,10 @@
       <div class="join-row">
         <input id="joinRoomId" placeholder="输入房间号" maxlength="10" />
         <button id="btnJoin" class="btn-join">加入</button>
+      </div>
+      <div id="publicRooms" class="public-rooms hidden">
+        <div class="pr-head">公开房间</div>
+        <div id="publicRoomsList" class="pr-list"></div>
       </div>
       <div id="accountHint" class="account-hint hidden"></div>
       <div id="envPanel" class="env-panel">
@@ -107,6 +115,7 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
         </button>
         <button id="btnLeave" class="btn-danger" title="离开房间">离开</button>
+        <button id="btnDestroyRoom" class="btn-destroy hidden" title="删除房间（仅房主）">删除房间</button>
       </div>
     </header>
 

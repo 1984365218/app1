@@ -2216,3 +2216,31 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
 }
 .account-hint .reclaim-candidate .rc-dot { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; }
 .account-hint .reclaim-candidate .rc-meta { flex: 1; line-height: 1.5; }
+
+/* 大厅公开房间列表 */
+.public-rooms { margin-top: 16px; }
+.public-rooms .pr-head { font-size: 12px; color: var(--text-3, #7a849c); margin-bottom: 8px; letter-spacing: .04em; }
+.public-rooms .pr-list { display: flex; flex-direction: column; gap: 6px; }
+.public-rooms .pr-row {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: var(--r-md, 12px);
+  background: var(--bg-card, rgba(255,255,255,0.04)); color: var(--text, #eef1f8);
+  font-size: 13px; cursor: pointer; text-align: left; transition: border-color .15s, background .15s;
+}
+.public-rooms .pr-row:hover { border-color: var(--border-hover, rgba(255,255,255,0.16)); background: var(--bg-card-hover, rgba(255,255,255,0.08)); }
+.public-rooms .pr-row.current { border-color: var(--accent, #818cf8); }
+.public-rooms .pr-row .pr-name { font-weight: 600; flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.public-rooms .pr-row .pr-video { flex: 1; color: var(--text-2, #b9c2d9); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.public-rooms .pr-row .pr-meta { font-size: 11px; color: var(--text-3, #7a849c); flex-shrink: 0; }
+
+/* 房间名输入框（大厅） */
+#roomNameInput { margin-bottom: 0; }
+
+/* 删除房间按钮（顶栏，仅房主可见） */
+.btn-destroy {
+  background: transparent; color: var(--danger, #f87171);
+  border: 1px solid var(--danger, rgba(248,113,113,0.4));
+  border-radius: var(--r-sm, 8px); padding: 6px 12px; font-size: 12px;
+  cursor: pointer; transition: background .15s;
+}
+.btn-destroy:hover { background: rgba(248,113,113,0.1); }

@@ -248,6 +248,10 @@ syncUserProfile({ silent: true });
 if (myName && !initialInviteRoom) {
   setTimeout(() => { try { maybeLookupReclaim(); } catch (e) {} }, 0);
 }
+// 大厅加载公开房间列表（非邀请链接场景才展示，避免干扰自动入房）
+if (!initialInviteRoom) {
+  setTimeout(() => { try { loadPublicRooms(); } catch (e) {} }, 200);
+}
 
 $('avatarPick').addEventListener('click', () => $('avatarInput').click());
 $('profileAvatarPick').addEventListener('click', () => $('profileAvatarInput').click());
@@ -615,6 +619,40 @@ async function loadMyRooms() {
   }
 }
 
+// 大厅公开房间列表：展示最近活跃的房间，点击直接加入
+async function loadPublicRooms() {
+  const wrap = $('publicRooms');
+  const list = $('publicRoomsList');
+  if (!wrap || !list) return;
+  try {
+    const res = await fetch('/api/rooms?limit=12');
+    const data = await res.json();
+    const rooms = (data && data.rooms) || [];
+    // 过滤掉无在线人数且无视频的"僵尸房"，只展示有内容的活跃房间
+    const active = rooms.filter((r) => r.online > 0 || (r.video && (r.video.title || r.video.bili || r.video.url)));
+    if (!active.length) { wrap.classList.add('hidden'); return; }
+    list.innerHTML = '';
+    active.forEach((r) => {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'pr-row' + (r.id === currentRoomId ? ' current' : '');
+      const online = r.online || 0;
+      const vlabel = (r.video && (r.video.title || r.video.label)) || '';
+      row.innerHTML = `<span class="pr-name"></span><span class="pr-video"></span><span class="pr-meta"></span>`;
+      row.querySelector('.pr-name').textContent = r.name || '未命名观影房';
+      row.querySelector('.pr-video').textContent = vlabel ? `🎬 ${vlabel}` : '';
+      row.querySelector('.pr-meta').textContent = `${online} 人在线 · ${r.id}`;
+      row.addEventListener('click', () => {
+        if (r.id === currentRoomId) return;
+        if ($('joinRoomId')) $('joinRoomId').value = r.id;
+        if ($('btnJoin')) $('btnJoin').click();
+      });
+      list.appendChild(row);
+    });
+    wrap.classList.remove('hidden');
+  } catch (e) { /* 静默失败，不影响大厅使用 */ }
+}
+
 function logoutLocalAccount() {
   if (!confirm('退出当前账号将清掉本机保存的昵称/头像/账号 ID。下次回来需要重新召回或新建账号。确认退出吗？')) return;
   try {
@@ -893,7 +931,7 @@ async function createRoom() {
   // 用户从大厅主动创建：先确保召回闭环（已召回旧账号或确认新建）
   if (!(await ensureReclaimResolved())) return;
   await prepareIdentity({ host: true });
-  socket.emit('room:create', { roomName: '', userName: myName, userId: userProfile.id, avatar: userProfile.avatar }, (res) => {
+  socket.emit('room:create', { roomName: ($('roomNameInput') ? $('roomNameInput').value.trim() : ''), userName: myName, userId: userProfile.id, avatar: userProfile.avatar }, (res) => {
     if (res && res.user) {
       persistProfile(res.user);
       renderProfileUi();
@@ -934,13 +972,17 @@ function enterRoom(roomId, { created = false } = {}) {
   currentRoomId = normalizeRoomId(roomId);
   lobby.classList.add('hidden');
   room.classList.remove('hidden');
-  $('roomName').textContent = '观影房';
+  // 房间名先占位，room:state 到达后会用服务端的 room.name 覆盖
+  const inputName = $('roomNameInput') ? $('roomNameInput').value.trim() : '';
+  $('roomName').textContent = inputName || '观影房';
   $('roomIdLabel').textContent = currentRoomId;
   $('btnCopy').title = '复制邀请链接';
+  // 房主才显示「删除房间」按钮，room:state 到达后按 isHost 精确切换
+  $('btnDestroyRoom').classList.toggle('hidden', !isHost);
   if (history.replaceState) history.replaceState(null, '', `/r/${currentRoomId}`);
   socket.emit('crypto:pubkey', { pubKey: myPubKey });
   appendSystem(`🔒 聊天已端到端加密（ECDH + AES-GCM）`);
-  appendSystem(`欢迎来到房间「${currentRoomId}」。邀请链接已准备好，可以直接发给朋友。`);
+  appendSystem(`欢迎来到房间「${$('roomName').textContent}」。邀请链接已准备好，可以直接发给朋友。`);
   if (created) appendSystem('房间已创建。先加载一个视频，其他人进来后会自动看到当前状态。');
   renderEnvStatus();
   updateRoomHome();
@@ -983,6 +1025,7 @@ socket.on('room:state', ({ room, users, video, recentMessages, maxSeq } = {}) =>
   for (const k of userAudioLevels.keys()) if (!presentIds.has(k)) userAudioLevels.delete(k);
   isHost = !!users.find((u) => u.id === socket.id && u.isHost);
   myId = socket.id;
+  $('btnDestroyRoom').classList.toggle('hidden', !isHost);
   renderUsers();
 
   videoState = { ...videoState, ...video };
@@ -1007,6 +1050,7 @@ socket.on('room:users', (users) => {
   roomUsers.forEach((u) => userAudioLevels.set(u.id, u.level || userAudioLevels.get(u.id) || 0));
   const wasHost = isHost;
   isHost = !!users.find((u) => u.id === socket.id && u.isHost);
+  $('btnDestroyRoom').classList.toggle('hidden', !isHost);
   renderUsers();
   updateRoomHome();
   // 房主变更后重新协商群密钥：本端刚被推选为房主、但手上还没有群密钥时，生成新群密钥并广播 rekey，
@@ -1029,6 +1073,22 @@ socket.on('user:leave', ({ id }) => {
   renderUsers();
   closePeer(id);
   if (u) appendSystem(`「${u.name}」离开了房间`);
+});
+// 房间被房主删除：清理本地状态，弹提示回大厅
+socket.on('room:destroyed', ({ roomId, by }) => {
+  const isMe = by === socket.id;
+  [...peers.keys()].forEach((id) => closePeer(id));
+  if (localStream) { localStream.getTracks().forEach((t) => t.stop()); localStream = null; }
+  stopLocalMeter();
+  currentRoomId = null;
+  roomUsers = [];
+  isHost = false;
+  resetReclaimState();
+  room.classList.add('hidden');
+  lobby.classList.remove('hidden');
+  if (history.replaceState) history.replaceState(null, '', '/');
+  alert(isMe ? '房间已删除。' : '房间已被房主删除，你已返回大厅。');
+  loadPublicRooms();
 });
 
 function audioPrefKey(id) {
@@ -2316,6 +2376,14 @@ function closePeer(id) {
 //  离开
 // ===================================================================
 $('btnLeave').addEventListener('click', leave);
+$('btnDestroyRoom').addEventListener('click', async () => {
+  if (!currentRoomId || !isHost) return;
+  if (!confirm(`确定删除房间「${$('roomName').textContent}」？\n\n房间内的所有聊天记录和成员记录将被永久清除，无法恢复。`)) return;
+  socket.emit('room:destroy', (res) => {
+    if (res && res.error) { alert(res.error); return; }
+    // 删除成功：room:destroyed 事件会负责清理 UI 并回大厅
+  });
+});
 $('btnCopy').addEventListener('click', () => copyInviteLink());
 // 复制文本：优先用 navigator.clipboard（仅安全上下文可用），否则降级到 execCommand（http://IP 明文 context 也可用）
 function copyInviteLink() {

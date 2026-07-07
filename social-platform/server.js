@@ -946,6 +946,46 @@ io.on('connection', (socket) => {
   socket.on('disconnect', leaveRoom);
   socket.on('room:leave', leaveRoom);
 
+  // 房主删除房间：彻底清除内存 + 数据库（rooms / messages / room_members），并通知房内所有人踢回大厅
+  socket.on('room:destroy', (cb) => {
+    const room = rooms.get(currentRoom);
+    if (!room) { if (typeof cb === 'function') cb({ error: '不在房间内' }); return; }
+    const u = room.users.get(socket.id);
+    if (!u || !u.isHost) { if (typeof cb === 'function') cb({ error: '只有房主才能删除房间' }); return; }
+    const rid = currentRoom;
+    if (room.emptyTimer) { clearTimeout(room.emptyTimer); room.emptyTimer = null; }
+    // 通知房内所有人房间已销毁，客户端应回大厅
+    io.to(rid).emit('room:destroyed', { roomId: rid, by: socket.id });
+    // 让所有客户端 socket 离开 io room，清理内存 users
+    for (const sid of [...room.users.keys()]) {
+      const s = io.sockets.sockets.get(sid);
+      if (s) { s.leave(rid); if (s !== socket) { try { s.emit('room:destroyed', { roomId: rid, by: socket.id }); } catch (e) {} } }
+    }
+    room.users.clear();
+    rooms.delete(rid);
+    // 清数据库
+    try {
+      dbRun('DELETE FROM rooms WHERE id = ?', [rid]);
+      dbRun('DELETE FROM messages WHERE room_id = ?', [rid]);
+      dbRun('DELETE FROM room_members WHERE room_id = ?', [rid]);
+      schedulePersist();
+    } catch (e) { console.error('[room:destroy] db cleanup failed:', e); }
+    currentRoom = null;
+    if (typeof cb === 'function') cb({ ok: true });
+  });
+
+  // 房主修改房间名
+  socket.on('room:rename', ({ name }) => {
+    const room = rooms.get(currentRoom);
+    if (!room) return;
+    const u = room.users.get(socket.id);
+    if (!u || !u.isHost) return;
+    room.name = cleanText(name, room.name, 40);
+    room.updatedAt = Date.now();
+    saveRoom(room);
+    io.to(currentRoom).emit('room:state', { room: publicRoom(room) });
+  });
+
   // ---------- 密钥协商中转（服务端只转发公钥/加密信封，不接触群密钥明文） ----------
   socket.on('crypto:pubkey', ({ pubKey }) => {
     const room = rooms.get(currentRoom);
