@@ -10,6 +10,7 @@
 
 const socket = io();
 let myPubKey = null; // 自己的 ECDH 公钥（base64），进入房间后广播
+const cryptoReadyWaiters = [];
 const STORAGE_KEY = 'watchparty:settings:v1';
 const THEME_OPTIONS = [
   { value: 'midnight', label: '午夜' },
@@ -1012,6 +1013,7 @@ socket.on('crypto:groupkey', async ({ fromId, pubKey, env }) => {
   if (!env) return;
   try {
     await cqCrypto.unwrapGroupKey(pubKey || myPubKey, env);
+    notifyCryptoReady();
     appendSystem('🔑 加密通道已建立');
   } catch (e) { console.error('unwrap group key failed', e); }
 });
@@ -1019,6 +1021,40 @@ socket.on('crypto:groupkey', async ({ fromId, pubKey, env }) => {
 socket.on('crypto:rekey', () => {
   if (myPubKey) socket.emit('crypto:pubkey', { pubKey: myPubKey });
 });
+
+async function ensureHostCryptoKey() {
+  if (!isHost || cqCrypto.hasKey()) return;
+  try {
+    await cqCrypto.createGroupKey();
+    notifyCryptoReady();
+    socket.emit('crypto:rekey');
+    appendSystem('🔑 已为房主建立新的加密通道');
+  } catch (e) {
+    console.error('create host group key failed', e);
+  }
+}
+
+function notifyCryptoReady() {
+  while (cryptoReadyWaiters.length) cryptoReadyWaiters.shift()(true);
+}
+
+function waitForCryptoKey(timeoutMs = 1600) {
+  if (cqCrypto.hasKey()) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let waiter = null;
+    const done = (ok) => {
+      const idx = cryptoReadyWaiters.indexOf(waiter);
+      if (idx >= 0) cryptoReadyWaiters.splice(idx, 1);
+      resolve(ok || cqCrypto.hasKey());
+    };
+    const timer = setTimeout(() => done(false), timeoutMs);
+    waiter = (ok) => {
+      clearTimeout(timer);
+      done(ok);
+    };
+    cryptoReadyWaiters.push(waiter);
+  });
+}
 
 // ===================================================================
 //  房间状态 & 用户列表
@@ -1033,6 +1069,7 @@ socket.on('room:state', ({ room, users, video, recentMessages, maxSeq } = {}) =>
   isHost = !!users.find((u) => u.id === socket.id && u.isHost);
   myId = socket.id;
   $('btnDestroyRoom').classList.toggle('hidden', !isHost);
+  ensureHostCryptoKey();
   renderUsers();
 
   videoState = { ...videoState, ...video };
@@ -1062,9 +1099,7 @@ socket.on('room:users', (users) => {
   updateRoomHome();
   // 房主变更后重新协商群密钥：本端刚被推选为房主、但手上还没有群密钥时，生成新群密钥并广播 rekey，
   // 让房间内其他人重新取回群密钥（避免"房主离开后新成员拿不到群密钥"）
-  if (isHost && !wasHost && !cqCrypto.hasKey()) {
-    cqCrypto.createGroupKey().then(() => socket.emit('crypto:rekey')).catch(() => {});
-  }
+  if (isHost && !wasHost) ensureHostCryptoKey();
 });
 socket.on('user:join', ({ user }) => {
   roomUsers.push(user);
@@ -1318,6 +1353,11 @@ async function sendChat() {
   if (!currentRoomId) return; // 未进入房间不发送
   const text = $('chatInput').value.trim();
   if (!text && pendingImages.length === 0) return;
+  if (!cqCrypto.hasKey()) {
+    await ensureHostCryptoKey();
+    if (!cqCrypto.hasKey() && myPubKey) socket.emit('crypto:pubkey', { pubKey: myPubKey });
+    if (!cqCrypto.hasKey()) await waitForCryptoKey();
+  }
   if (!cqCrypto.hasKey()) { alert('加密通道尚未建立，请稍候…'); return; }
   try {
     for (const img of pendingImages) {
