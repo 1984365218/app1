@@ -625,6 +625,10 @@ body {
 }
 
 .hidden { display: none !important; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
@@ -791,6 +795,12 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
   font-size: 13px;
   text-align: left;
 }
+.theme-field-compact {
+  padding: 0;
+  background: transparent;
+  border: none;
+  flex-shrink: 0;
+}
 .theme-field span {
   color: var(--text-2);
   font-weight: 650;
@@ -824,6 +834,10 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
   align-items: center;
   gap: 12px;
   text-align: left;
+  padding: 10px 12px;
+  background: var(--env-panel-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
 }
 .avatar-pick,
 .profile-avatar-large {
@@ -873,12 +887,14 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
    ============================================================ */
 .view { min-height: 100vh; }
 #lobby {
-  display: flex; align-items: center; justify-content: center;
+  display: flex; align-items: flex-start; justify-content: center;
   position: relative;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 32px 16px 48px;
 }
 .lobby-bg {
-  position: absolute; inset: 0; z-index: 0;
+  position: fixed; inset: 0; z-index: 0;
   background: var(--lobby-bg);
 }
 .lobby-bg::before {
@@ -894,28 +910,129 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
 }
 @keyframes stars { from { transform: translateY(0); } to { transform: translateY(-250px); } }
 
-.lobby-card {
+.lobby-shell {
   position: relative; z-index: 1;
-  width: 400px; max-width: 90vw;
-  padding: 44px 36px 38px;
+  width: 100%;
+  max-width: 440px;
+  margin: auto;
+}
+.lobby-card {
+  width: 100%;
+  padding: 28px 28px 24px;
   background: var(--panel-bg);
   backdrop-filter: blur(24px) saturate(1.4);
   -webkit-backdrop-filter: blur(24px) saturate(1.4);
   border: 1px solid var(--panel-border);
   border-radius: var(--r-xl);
   box-shadow: var(--shadow-lg), 0 0 80px rgba(99,102,241,.06);
-  display: flex; flex-direction: column; gap: 18px;
-  text-align: center;
+  display: flex; flex-direction: column; gap: 16px;
+  text-align: left;
 }
-.lobby-logo { display: flex; align-items: center; justify-content: center; gap: 12px; margin-bottom: 4px; }
-.logo-icon { font-size: 42px; line-height: 1; filter: drop-shadow(0 2px 8px rgba(99,102,241,.4)); animation: float 3s ease-in-out infinite; }
-@keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+.lobby-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.lobby-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.logo-icon {
+  font-size: 36px; line-height: 1; flex-shrink: 0;
+  filter: drop-shadow(0 2px 8px rgba(99,102,241,.4));
+}
+.lobby-brand-text { min-width: 0; }
 .lobby-card h1 {
-  font-size: 30px; font-weight: 800; letter-spacing: 1px;
+  font-size: 26px; font-weight: 800; letter-spacing: .5px; line-height: 1.15;
   background: var(--title-gradient);
   -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
 }
-.subtitle { color: var(--text-muted); font-size: 14px; }
+.subtitle { color: var(--text-muted); font-size: 13px; margin-top: 3px; }
+.lobby-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.field-label {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--text-2);
+  margin-bottom: 2px;
+}
+.field-label .optional {
+  color: var(--text-dim);
+  font-weight: 500;
+  margin-left: 4px;
+}
+.lobby-identity { gap: 6px; }
+.lobby-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.lobby-tab {
+  min-height: 38px;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13.5px;
+  font-weight: 700;
+  border: none;
+}
+.lobby-tab:hover { color: var(--text); }
+.lobby-tab.active {
+  color: var(--text);
+  background: var(--bg-card);
+  box-shadow: 0 1px 0 rgba(255,255,255,.04), 0 4px 14px rgba(0,0,0,.12);
+  border: 1px solid var(--border-hover);
+}
+.lobby-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  background: var(--env-panel-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+}
+.lobby-pane.hidden { display: none !important; }
+.lobby-advanced {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-input);
+  overflow: hidden;
+}
+.lobby-advanced > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--text-2);
+  user-select: none;
+}
+.lobby-advanced > summary::-webkit-details-marker { display: none; }
+.lobby-advanced > summary::after {
+  content: '▾';
+  float: right;
+  color: var(--text-dim);
+  transition: transform .15s ease;
+}
+.lobby-advanced[open] > summary::after { transform: rotate(180deg); }
+.lobby-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 12px 12px;
+}
 .invite-notice {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 10px 12px;
@@ -933,25 +1050,31 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
 .form-group { position: relative; display: flex; align-items: center; }
 .form-group .input-icon { position: absolute; left: 14px; z-index: 1; font-size: 17px; pointer-events: none; }
 .form-group input { width: 100%; padding: 13px 14px 13px 44px; font-size: 15px; border-radius: var(--r-md); }
-.divider { display: flex; align-items: center; gap: 12px; color: var(--text-dim); font-size: 12.5px; margin: 2px 0; }
-.divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, transparent, var(--border-hover), transparent); }
 .join-row { display: flex; gap: 10px; }
 .join-row input { flex: 1; padding: 12px 14px; border-radius: var(--r-md); font-size: 14.5px; }
-.lobby-room-opts {
-  display: flex; flex-direction: column; gap: 8px;
-  margin: -4px 0 10px; padding: 0 2px;
-}
 .lobby-check {
   display: flex; align-items: flex-start; gap: 8px;
   font-size: 12.5px; color: var(--text-2, #b9c2d9); line-height: 1.4; cursor: pointer;
 }
 .lobby-check input { margin-top: 2px; flex-shrink: 0; }
-.join-pwd-row { margin-top: 8px; }
+.join-pwd-row { margin-top: 0; }
 .room-owner-options {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px;
-  padding: 8px 16px; border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   background: var(--bg-card, rgba(255,255,255,0.03));
   font-size: 12.5px;
+}
+.room-owner-options > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 18px;
+  font-weight: 650;
+  color: var(--text-2);
+  user-select: none;
+}
+.room-owner-options > summary::-webkit-details-marker { display: none; }
+.room-owner-body {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px;
+  padding: 0 18px 12px;
 }
 .member-kick {
   margin-top: 6px; font-size: 11px; padding: 3px 8px; border-radius: 6px;
@@ -959,27 +1082,50 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
   background: transparent; color: var(--danger, #f87171); cursor: pointer;
 }
 .member-kick:hover { background: rgba(248,113,113,0.1); }
-.hint { color: var(--text-dim); font-size: 12.5px; line-height: 1.6; padding: 0 4px; }
+.hint {
+  color: var(--text-dim); font-size: 12px; line-height: 1.55;
+  text-align: center; padding: 0 4px; margin-top: -2px;
+}
 .env-panel {
   text-align: left;
-  padding: 12px;
+  padding: 0;
   background: var(--env-panel-bg);
-  border: 1px solid var(--border-hover);
+  border: 1px solid var(--border);
   border-radius: var(--r-md);
+  overflow: hidden;
 }
-.env-head {
+.env-panel > .env-head,
+.env-panel > summary.env-head {
+  list-style: none;
   display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 10px;
+  gap: 10px;
+  margin: 0;
+  padding: 10px 12px;
   color: var(--text);
   font-size: 13px;
   font-weight: 700;
+  cursor: pointer;
+  user-select: none;
 }
+.env-panel > summary.env-head::-webkit-details-marker { display: none; }
+.env-panel > summary.env-head::after {
+  content: '▾';
+  color: var(--text-dim);
+  font-weight: 500;
+  font-size: 12px;
+}
+.env-panel[open] > summary.env-head::after { content: '▴'; }
 .env-head strong {
   color: var(--text-2);
   font-size: 12px;
   font-weight: 600;
+  margin-left: auto;
+  margin-right: 8px;
 }
-.env-checks { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.env-checks {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+  padding: 0 12px 12px;
+}
 .env-item {
   display: flex; align-items: center; gap: 8px;
   min-width: 0;
@@ -1050,16 +1196,29 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
 .env-chip.bad { color: #fca5a5; border-color: rgba(239,68,68,.24); background: rgba(239,68,68,.08); }
 .env-chip.bad::before { background: var(--danger); }
 @keyframes pulse-tag { 0%, 100% { opacity: 1; } 50% { opacity: .7; } }
-.topbar-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.topbar-right {
+  display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+}
+.topbar-group {
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.topbar-group + .topbar-group {
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+.topbar-primary .btn-icon { min-height: 34px; }
 
 
 /* ============================================================
-   房间 —— 聊天主页（单栏居中）
+   房间 —— 聊天主页（左聊天 · 右侧工具）
    ============================================================ */
 .main-layout {
   display: flex; justify-content: center;
   height: calc(100vh - var(--topbar-h));
   overflow: hidden;
+}
+#room:has(.room-owner-options:not(.hidden)) .main-layout {
+  height: calc(100vh - var(--topbar-h) - 42px);
 }
 
 .chat-section {
@@ -1077,7 +1236,7 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
 .chat-body {
   flex: 1;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
+  grid-template-columns: minmax(0, 1fr) 320px;
   grid-template-areas: "main side";
   min-height: 0;
   overflow: hidden;
@@ -1091,29 +1250,28 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
 .room-side {
   grid-area: side;
   display: flex; flex-direction: column;
-  gap: 12px;
-  padding: 16px;
+  gap: 10px;
+  padding: 14px;
   overflow-y: auto;
   border-left: 1px solid var(--room-divider-soft);
   background: var(--env-panel-bg);
   min-height: 0;
 }
-.room-side .room-hero { margin: 0; grid-template-columns: 1fr; }
+.room-side .room-status { margin: 0; }
 .room-side .room-source-panel { margin: 0; }
-.room-side .watch-cta { margin: 0; }
 .room-side .source-grid { grid-template-columns: 1fr; }
 .room-side .room-snapshot {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   border-left: none; border-top: 1px solid var(--room-divider);
-  padding-left: 0; padding-top: 10px;
+  padding-left: 0; padding-top: 10px; margin-top: 10px;
 }
 .room-side .room-snapshot div {
   display: flex; flex-direction: column; align-items: flex-start;
-  gap: 2px; padding: 4px 0; border-bottom: none;
+  gap: 2px; padding: 2px 4px; border-bottom: none;
 }
 .mobile-room-tabs { display: none; }
 .room-env-notice {
-  margin: 14px 24px 0;
+  margin: 12px 20px 0;
   padding: 10px 14px;
   color: #fef3c7;
   background: rgba(245,158,11,.1);
@@ -1123,79 +1281,95 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
   line-height: 1.5;
 }
 
+/* 侧栏状态卡（原 room-hero，压缩层级） */
+.room-status,
 .room-hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(280px, .65fr);
-  gap: 18px;
-  margin: 18px 24px 0;
-  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0;
+  padding: 14px;
   background: var(--hero-bg);
   border: 1px solid var(--hero-border);
   border-radius: var(--r-lg);
-  box-shadow: var(--hero-shadow);
+  box-shadow: none;
   flex-shrink: 0;
 }
-.room-hero-main { min-width: 0; }
+.room-status-main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.room-status-copy { min-width: 0; }
 .room-kicker {
   color: var(--secondary-text);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 800;
   letter-spacing: .4px;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
+  text-transform: uppercase;
 }
+.room-status h2,
 .room-hero h2 {
-  font-size: 22px;
-  line-height: 1.25;
+  font-size: 16px;
+  line-height: 1.3;
   color: var(--text);
-  margin: 0 0 6px;
+  margin: 0 0 4px;
   letter-spacing: 0;
 }
+.room-status p,
 .room-hero p {
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 12.5px;
   margin: 0;
+  line-height: 1.45;
 }
 .room-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr);
+  gap: 8px;
+}
+.room-actions .btn-secondary,
+.room-actions .btn-watch {
+  width: 100%;
+  justify-content: center;
+  min-height: 36px;
+  padding: 0 10px;
+  font-size: 13px;
 }
 .room-snapshot {
   display: grid;
-  grid-template-columns: 1fr;
-  align-content: center;
-  border-left: 1px solid var(--room-divider);
-  padding-left: 18px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
 }
 .room-snapshot div {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 9px 0;
-  border-bottom: 1px solid var(--room-divider-soft);
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 4px;
+  border-right: 1px solid var(--room-divider-soft);
 }
-.room-snapshot div:last-child { border-bottom: none; }
+.room-snapshot div:last-child { border-right: none; }
 .room-snapshot span {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 11px;
 }
 .room-snapshot strong {
   color: var(--text);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 750;
-  max-width: 170px;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .room-source-panel {
-  margin: 12px 24px 0;
-  padding: 14px;
+  margin: 0;
+  padding: 12px;
   background: var(--source-bg);
-  border: 1px solid var(--border-hover);
+  border: 1px solid var(--border);
   border-radius: var(--r-lg);
   flex-shrink: 0;
 }
@@ -1257,9 +1431,9 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
 .room-file-btn { flex-shrink: 0; }
 
 .audio-panel {
-  padding: 14px;
+  padding: 12px;
   background: var(--source-bg);
-  border: 1px solid var(--border-hover);
+  border: 1px solid var(--border);
   border-radius: var(--r-lg);
   flex-shrink: 0;
 }
@@ -1332,31 +1506,20 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
 }
 .audio-actions .btn-sm-wide { flex: 1; }
 
-/* 观影 CTA 横幅 */
+/* 观影 CTA：桌面侧栏已有状态卡入口，默认隐藏避免重复 */
 .watch-cta {
-  display: flex; align-items: center; gap: 14px;
-  margin: 16px 24px 0;
-  padding: 14px 18px;
-  background: linear-gradient(135deg, rgba(124,92,246,.16), rgba(99,102,241,.08));
-  border: 1px solid rgba(124,92,246,.28);
-  border-radius: var(--r-lg);
-  flex-shrink: 0;
-  animation: cta-in .3s ease;
+  display: none !important;
 }
-@keyframes cta-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
-.cta-art {
-  font-size: 30px; line-height: 1;
-  filter: drop-shadow(0 2px 8px rgba(124,92,246,.4));
-}
+.cta-art { font-size: 30px; line-height: 1; }
 .cta-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
 .cta-text strong { font-size: 14.5px; color: var(--text); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cta-text span { font-size: 12.5px; color: var(--text-muted); }
-.watch-cta .btn-watch { flex-shrink: 0; padding: 9px 18px; }
 
 /* 聊天头部 */
 .chat-header {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 16px 24px 12px; flex-shrink: 0;
+  padding: 14px 20px 10px; flex-shrink: 0;
+  border-bottom: 1px solid var(--room-divider-soft);
 }
 .chat-header-left { display: flex; align-items: center; gap: 8px; }
 .chat-title { font-size: 16px; font-weight: 700; color: var(--text); }
@@ -1369,7 +1532,7 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
 
 /* 消息列表 */
 .chat-messages {
-  flex: 1; overflow-y: auto; padding: 8px 24px 16px;
+  flex: 1; overflow-y: auto; padding: 12px 20px 16px;
   display: flex; flex-direction: column; gap: 4px; min-height: 0; position: relative;
 }
 
@@ -1412,10 +1575,11 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
 /* ---------- 聊天输入栏 ---------- */
 .chat-input-bar {
   display: flex; align-items: center; gap: 10px;
-  padding: 12px 24px 18px; flex-shrink: 0;
-  background: linear-gradient(to top, var(--room-bg) 40%, transparent);
+  padding: 12px 16px 16px; flex-shrink: 0;
+  border-top: 1px solid var(--room-divider-soft);
+  background: var(--room-bg);
 }
-.pending-attach { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 10px 24px 0; flex-shrink: 0; }
+.pending-attach { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 10px 16px 0; flex-shrink: 0; }
 .pending-attach.hidden { display: none; }
 .pending-thumb { position: relative; width: 72px; height: 72px; border-radius: var(--r-md); overflow: hidden; border: 1px solid var(--border); }
 .pending-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -1852,15 +2016,21 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
     min-width: 46px;
   }
   .topbar-right {
-    gap: 4px;
+    gap: 6px;
     min-width: 0;
   }
+  .topbar-group + .topbar-group {
+    padding-left: 6px;
+  }
+  .topbar-secondary .topbar-theme,
+  .topbar-secondary #btnCopy { display: none; }
   .room-badge {
     gap: 0;
     font-size: 0;
   }
   .room-badge svg,
-  .room-badge strong {
+  .room-badge strong,
+  .room-badge-label {
     display: none;
   }
   .room-badge code {
@@ -1903,6 +2073,9 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
     line-height: 1;
     font-weight: 800;
   }
+  .topbar .btn-destroy {
+    display: none;
+  }
   .topbar-theme {
     width: 66px;
     min-width: 66px;
@@ -1915,7 +2088,6 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
   .chat-header {
     min-height: 44px;
     padding: 10px 14px 8px;
-    border-bottom: 1px solid var(--room-divider-soft);
   }
   .chat-title { font-size: 14px; }
   .member-count { padding: 2px 8px; font-size: 12px; }
@@ -1955,59 +2127,40 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
     border-radius: 12px;
   }
   .room-env-notice { margin: 12px 14px 0; }
+  .room-side .room-status,
   .room-side .room-hero {
-    grid-template-columns: 1fr;
     margin: 0;
     padding: 10px;
     border-radius: 14px;
-    box-shadow: none;
   }
-  .room-kicker {
-    display: none;
-  }
+  .room-kicker { display: none; }
+  .room-status h2,
   .room-hero h2 {
     margin: 0;
-    font-size: 17px;
-    line-height: 1.2;
+    font-size: 15px;
+    line-height: 1.25;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .room-hero p {
-    display: none;
-  }
+  .room-status p,
+  .room-hero p { display: none; }
   .room-actions {
-    display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 8px;
-    margin-top: 9px;
   }
   .room-actions .btn-secondary,
   .room-actions .btn-watch {
-    width: 100%;
     min-height: 34px;
-    padding: 0 10px;
-    justify-content: center;
     font-size: 13px;
-  }
-  .room-snapshot {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    border-left: none;
-    border-top: 1px solid var(--room-divider);
-    padding-left: 0;
-    padding-top: 8px;
   }
   .room-side .room-snapshot {
     margin-top: 8px;
-    padding-top: 6px;
+    padding-top: 8px;
   }
   .room-side .room-snapshot div {
-    display: block;
     padding: 2px 5px;
-    border-bottom: none;
-    border-right: 1px solid var(--room-divider-soft);
   }
-  .room-snapshot div:last-child { border-right: none; }
   .room-snapshot span { font-size: 11px; }
   .room-snapshot strong { font-size: 12.5px; max-width: 100%; }
   .mobile-room-tabs {
@@ -2034,13 +2187,11 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
     box-shadow: inset 0 0 0 1px var(--accent-soft);
   }
   .room-side.mobile-panel-source .audio-panel,
-  .room-side.mobile-panel-audio .room-source-panel,
-  .room-side.mobile-panel-audio .watch-cta {
+  .room-side.mobile-panel-audio .room-source-panel {
     display: none;
   }
   .room-side .room-source-panel,
-  .room-side .audio-panel,
-  .room-side .watch-cta {
+  .room-side .audio-panel {
     margin: 0;
     padding: 12px;
     border-radius: 14px;
@@ -2084,13 +2235,6 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
   .audio-field select { height: 34px; font-size: 12.5px; }
   .level-meter { margin: 9px 0; }
   .audio-actions { gap: 8px; }
-  .watch-cta {
-    gap: 10px;
-    padding: 12px;
-  }
-  .cta-art { display: none; }
-  .cta-text strong { white-space: normal; }
-  .watch-cta .btn-watch { padding: 8px 12px; }
   .watch-top {
     gap: 8px;
     padding: 0 10px;
@@ -2137,7 +2281,11 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
     max-width: none;
     border-radius: 16px;
   }
-  .lobby-card { padding: 32px 24px 28px; }
+  #lobby { padding: 20px 12px 32px; }
+  .lobby-card { padding: 22px 18px 18px; gap: 14px; }
+  .lobby-card h1 { font-size: 22px; }
+  .logo-icon { font-size: 30px; }
+  .lobby-pane { padding: 12px; }
   .env-checks { grid-template-columns: 1fr; }
   .msg-img { max-width: 180px; max-height: 180px; }
 }
@@ -2229,8 +2377,11 @@ select { cursor: pointer; padding-right: 28px; appearance: none; background-imag
 .account-hint .reclaim-candidate .rc-meta { flex: 1; line-height: 1.5; }
 
 /* 大厅房间列表（统一：展示所有房间，房主行内可改名/删除） */
-.public-rooms { margin-top: 16px; }
-.public-rooms .pr-head { font-size: 12px; color: var(--text-3, #7a849c); margin-bottom: 8px; letter-spacing: .04em; }
+.public-rooms { margin-top: 0; }
+.public-rooms .pr-head {
+  font-size: 12px; color: var(--text-3, #7a849c); margin-bottom: 8px;
+  letter-spacing: .04em; font-weight: 650;
+}
 .public-rooms .pr-list { display: flex; flex-direction: column; gap: 6px; }
 .public-rooms .pr-row {
   display: flex; align-items: center; gap: 8px; padding: 0;

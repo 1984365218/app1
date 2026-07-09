@@ -791,12 +791,34 @@ document.querySelectorAll('[data-mobile-room-panel]').forEach((button) => {
   button.addEventListener('click', () => setMobileRoomPanel(button.dataset.mobileRoomPanel));
 });
 setMobileRoomPanel(savedSettings.mobileRoomPanel || 'source');
+
+// 大厅：创建 / 加入 分区切换，减少同屏字段
+function setLobbyTab(tab) {
+  const next = tab === 'join' ? 'join' : 'create';
+  document.querySelectorAll('[data-lobby-tab]').forEach((btn) => {
+    const on = btn.dataset.lobbyTab === next;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  document.querySelectorAll('[data-lobby-pane]').forEach((pane) => {
+    const on = pane.dataset.lobbyPane === next;
+    pane.classList.toggle('hidden', !on);
+    if (on) pane.removeAttribute('hidden');
+    else pane.setAttribute('hidden', '');
+  });
+}
+document.querySelectorAll('[data-lobby-tab]').forEach((btn) => {
+  btn.addEventListener('click', () => setLobbyTab(btn.dataset.lobbyTab));
+});
+setLobbyTab('create');
+
 if (myName) $('userName').value = myName;
 if (initialInviteRoom) {
   $('joinRoomId').value = initialInviteRoom;
   $('btnJoin').textContent = '加入邀请';
   $('inviteRoomLabel').textContent = initialInviteRoom;
   $('inviteNotice').classList.remove('hidden');
+  setLobbyTab('join');
   // 邀请链接场景：提示用户输完昵称按回车即可直接加入，不走账号召回流程
   if ($('userName')) $('userName').placeholder = '输入昵称，按回车即可加入房间';
 }
