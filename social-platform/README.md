@@ -2,11 +2,13 @@
 
 基于 **Node.js（Express + Socket.IO）** 的轻量社交平台：支持创建房间、进入房间、房间内**连麦（语音）**、**聊天**、**用户资料**，以及核心功能——**多人观影**。
 
+适合 **HTTPS 公网给朋友用**：内置 Session 鉴权、房间所有者/主持人分离、可选房间密码、大厅可见性、踢人、限流与 TURN 配置入口。
+
 ## 核心理念：视频不在服务端传输
 
 每个人在**自己的电脑上、用自己的网络**播放视频，服务端**只同步播放进度与控制指令**：
 
-- 服务端不存储、不中转视频流，带宽成本极低；
+- 服务端不存储、不中转视频流（B 站场景除外会走本机媒体代理），带宽成本可控；
 - 同步的内容只有：`播放 / 暂停 / 跳转(进度) / 周期性纠偏`；
 - 新成员加入时，服务端下发当前视频状态，做到「进来就能跟上进度」。
 
@@ -14,14 +16,17 @@
 
 | 功能 | 说明 |
 | --- | --- |
-| 创建房间 | 生成一个 6 位房间号，第一个进入者自动成为房主 |
-| 加入房间 | 输入房间号即可进入，自动同步当前视频进度 |
-| 多人观影 | 支持「视频直链 URL」或「本地文件」两种片源 |
-| 进度同步 | 播放/暂停/拖动进度会广播给所有人；每 5 秒由控制者纠偏一次漂移 |
-| 实时聊天 | 房间内公屏聊天 |
-| 连麦 | 基于 WebRTC 的 P2P 语音（完美协商 mesh），支持输入设备切换、试音、成员开麦状态和音量控制 |
-| 用户资料 | 支持昵称、头像，资料保存在 SQLite |
-| 房间永久保留 | 房间、房主和片源状态写入 SQLite，服务重启后仍可通过房间号进入 |
+| 创建房间 | 6 位房间号；创建者为**所有者**（可删房） |
+| 加入房间 | 房间号或邀请链接；支持可选房间密码 |
+| 可见性 | 默认 **仅链接**（unlisted）；可勾选公开到大厅 |
+| 播控权限 | 默认仅主持人；可开「全员可控」 |
+| 多人观影 | 视频直链 / 本地文件 / B 站 / HLS / 部分 iframe 站 |
+| 进度同步 | 播放/暂停/拖动广播；主持人周期纠偏 |
+| 实时聊天 | 房间内 E2E 加密公屏（密文存库） |
+| 连麦 | WebRTC mesh；公网需配置 TURN（`ICE_SERVERS`） |
+| 踢人 | 所有者/主持人可踢人（短时禁止再进） |
+| 用户资料 | 昵称、头像、可选账号密码；Session Token 鉴权 |
+| 房间永久保留 | 房间与片源写入 SQLite，重启后仍可进 |
 
 ## 运行方式
 
@@ -32,41 +37,73 @@ npm start
 # 打开 http://localhost:3000
 ```
 
-多人测试：在不同浏览器/设备打开同一地址，一人「创建房间」拿到房间号，其他人「加入房间」输入该房间号即可。
+多人测试：不同浏览器打开同一地址，一人创建房间，其他人加入。
 
-> 跨设备（不同机器）访问时建议使用 HTTPS。`http://IP` 属于浏览器非安全上下文，连麦麦克风、原生 WebCrypto、剪贴板等能力会受限制。局域网临时测试可运行 `npm run start:https` 后访问 `https://<局域网IP>:3000` 并信任自签名证书；Ubuntu 公网服务器请看 [deploy/README-ubuntu-https.md](deploy/README-ubuntu-https.md)。
+> 跨设备访问请用 **HTTPS**。`http://IP` 下麦克风、原生 WebCrypto 等会受限。局域网可 `npm run start:https`；Ubuntu 公网见 [deploy/README-ubuntu-https.md](deploy/README-ubuntu-https.md)。
 
-默认数据库文件在 `social-platform/data/watchparty.sqlite`，该目录已加入 `.gitignore`，避免 VPS 上 `git pull` 覆盖真实数据。生产部署建议设置 `DATA_DIR=/var/lib/watchparty` 或 `DB_PATH=/var/lib/watchparty/watchparty.sqlite`，详见部署文档。
+默认数据库：`social-platform/data/watchparty.sqlite`（已 gitignore）。生产建议：
+
+```bash
+HOST=127.0.0.1 PORT=3000 TRUST_PROXY=1 DATA_DIR=/var/lib/watchparty node server.js
+```
+
+## 公网相关环境变量
+
+| 变量 | 说明 |
+| --- | --- |
+| `HOST` / `PORT` | 监听地址，生产建议 `127.0.0.1` |
+| `TRUST_PROXY` | `1` 时信任反代 `X-Forwarded-*` |
+| `DATA_DIR` / `DB_PATH` | SQLite 路径 |
+| `CORS_ORIGIN` | 如 `https://watch.example.com`，默认 `*` |
+| `SESSION_TTL_DAYS` | 会话有效天数，默认 30 |
+| `ICE_SERVERS` | JSON 数组，STUN/TURN 配置 |
+| `BILI_PROXY_ENABLED` | `0` 关闭 B 站媒体代理 |
+| `BILI_PROXY_MAX_MB_PER_IP_HOUR` | 每 IP 每小时代理流量上限（MB） |
+| `KICK_BAN_MS` | 被踢后禁止再进时长，默认 10 分钟 |
+
+示例 TURN：
+
+```bash
+ICE_SERVERS='[{"urls":"stun:stun.l.google.com:19302"},{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]'
+```
 
 ## 目录结构
 
 ```
 social-platform/
-├── package.json        # 依赖与启动脚本
-├── server.js           # 服务端：SQLite / 用户资料 / 房间管理 / 聊天 / 进度同步 / WebRTC 信令
+├── package.json
+├── server.js           # 鉴权 / 房间 / 同步 / 信令 / 限流
+├── deploy/             # Nginx + systemd 示例
 └── public/
-    ├── index.html      # 大厅 + 房间页面
-    ├── style.css       # 样式
-    └── client.js       # 前端：房间、视频同步、聊天、资料、连麦逻辑
+    ├── index.html
+    ├── style.css
+    ├── client.js
+    └── vendor/crypto-polyfill.js
 ```
+
+## 安全说明（公网必读）
+
+- 敏感操作（删房、改密、改名、历史消息）依赖 **Session Token**，不再只信客户端自报的 `userId`。
+- 昵称召回接口返回短时 `reclaimToken`，**不暴露真实 userId**。
+- 房间 **所有者** 与临时 **主持人** 分离：所有者离线不会丢掉删房权。
+- 仍为轻量模型：无强实名登录；建议朋友设账号密码 + 房间密码，默认不公开到大厅。
+- Mesh 连麦约适合 ≤6 人；跨运营商务必配 TURN。
 
 ## 观影片源说明
 
-- **视频直链 URL**：所有人可直接加载，最适合「一起看同一个在线视频」。
-- **本地文件**：每个人需在本机选择**相同文件**，才能保证进度一致（服务端无法替你分发文件）。
+- **视频直链 URL**：所有人可直接加载。
+- **本地文件**：每人需在本机选择相同文件。
+- **B 站**：服务端解析 + 可选媒体代理（流量走你的 VPS）。
 
-## 连麦（语音）原理
+## 连麦原理
 
-- 使用浏览器 `getUserMedia` 获取麦克风，`RTCPeerConnection` 建立 P2P 音频连接；
-- 采用 **完美协商（Perfect Negotiation）** 模式，自动处理双方同时发起连接造成的冲突；
-- 服务端仅转发 SDP Offer/Answer 与 ICE 候选（信令），音频流直接点对点传输；
-- 内置 STUN 服务器，适用于局域网/同一 WiFi 环境；**跨公网**需自行配置 TURN 服务器（在 `client.js` 的 `rtcConfig` 中补充 `turn` 项）。
+- `getUserMedia` + `RTCPeerConnection`（完美协商 mesh）。
+- 服务端只转发 SDP/ICE；音频 P2P。
+- 默认 Google STUN；公网请用 `ICE_SERVERS` 配 TURN。
 
-## 已知限制 / 可扩展点
+## 已知限制
 
-- 连麦为全网状（mesh）模式，适合小规模（约 ≤ 6 人）；更大规模建议引入 SFU（如 mediasoup / LiveKit）。
-- 视频同步为「指令同步 + 周期纠偏」，极端网络下可能有亚秒级偏差（阈值 1 秒才校正，可调整）。
-- 当前是轻量资料系统，没有账号密码登录；同一浏览器会复用本地用户 ID，生产环境如需强身份可继续接入登录鉴权。
-- 房间会保留在 SQLite 中；无人在线时只释放内存里的在线状态，不删除数据库记录。
-- 无房间密码与权限分级，生产环境请按需要补充。
-```
+- 连麦 mesh，大规模需 SFU。
+- 进度同步弱网下可能有亚秒级偏差。
+- sql.js 单机内存库，适合朋友小站，不适合多实例水平扩展。
+- E2E 聊天：晚进房/换主持人可能解不开历史密文。

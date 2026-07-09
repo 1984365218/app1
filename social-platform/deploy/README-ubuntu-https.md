@@ -160,6 +160,59 @@ https://服务器IP:3000
 
 首次访问需要在浏览器里手动信任证书。这个方案适合临时测试，不适合给普通用户长期使用。
 
-## 6. 公网连麦额外注意
+## 6. 公网安全、鉴权与 TURN
 
-HTTPS 解决的是浏览器权限问题，但公网 WebRTC 语音还可能被双方 NAT/防火墙挡住。跨网络连麦不稳定时，需要配置 TURN 服务，例如 coturn，然后在 `public/client.js` 的 `rtcConfig` 里加入你的 TURN 地址、用户名和密码。
+应用已内置：
+
+- **Session Token** 鉴权（删房/改密/历史消息等不再只信客户端 userId）
+- 房间 **所有者 / 主持人** 分离、可选房间密码、默认大厅不公开
+- 进程内限流、B 站代理流量上限
+- 前端启动时请求 `GET /api/runtime-config` 拉取 ICE 服务器
+
+### 推荐环境变量（systemd）
+
+见 `watchparty.service.example`。生产至少设置：
+
+```bash
+HOST=127.0.0.1
+TRUST_PROXY=1
+DATA_DIR=/var/lib/watchparty
+CORS_ORIGIN=https://你的域名
+# 可选：关闭 B 站代理以省流量
+# BILI_PROXY_ENABLED=0
+```
+
+### TURN（公网连麦必备）
+
+HTTPS 解决浏览器权限，但跨 NAT/运营商语音常需 TURN（如 coturn）。配置后写入环境变量即可，**不必再改 client.js**：
+
+```bash
+ICE_SERVERS='[{"urls":"stun:stun.l.google.com:19302"},{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]'
+```
+
+coturn 最小思路（示例，按发行版文档细化防火墙与 TLS）：
+
+```text
+listening-port=3478
+fingerprint
+lt-cred-mech
+user=u:p
+realm=turn.example.com
+# 公网 IP 与中继网段按机器填写
+# external-ip=YOUR_PUBLIC_IP
+```
+
+改完后：
+
+```bash
+sudo systemctl restart watchparty
+curl -s http://127.0.0.1:3000/api/runtime-config
+curl -s http://127.0.0.1:3000/health
+```
+
+### 使用建议（给朋友）
+
+1. 创建房间默认 **仅邀请链接**，需要时再勾选「公开到大厅」。
+2. 可设房间密码；账号建议设密码（≥6 位）。
+3. 删房间只有 **所有者** 能做；临时主持人只负责播控/踢人。
+4. 升级代码前备份 `DATA_DIR` 下 sqlite。

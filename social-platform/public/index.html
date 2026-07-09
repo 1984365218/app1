@@ -55,6 +55,14 @@
         <div class="input-icon">🎬</div>
         <input id="roomNameInput" placeholder="给房间起个名字（可选）" maxlength="40" autocomplete="off" />
       </div>
+      <div class="form-group">
+        <div class="input-icon">🔒</div>
+        <input id="roomPasswordInput" type="password" placeholder="房间密码（可选，至少 4 位）" maxlength="32" autocomplete="new-password" />
+      </div>
+      <div class="lobby-room-opts">
+        <label class="lobby-check"><input id="roomVisibility" type="checkbox" /> 公开到大厅（默认仅邀请链接）</label>
+        <label class="lobby-check"><input id="roomControlAnyone" type="checkbox" /> 允许全员控制片源（默认仅主持人）</label>
+      </div>
       <button id="btnCreate" class="btn-primary">
         <span>✨</span> 创建房间
       </button>
@@ -63,8 +71,12 @@
         <input id="joinRoomId" placeholder="输入房间号" maxlength="10" />
         <button id="btnJoin" class="btn-join">加入</button>
       </div>
+      <div class="form-group join-pwd-row">
+        <div class="input-icon">🔑</div>
+        <input id="joinRoomPassword" type="password" placeholder="房间密码（如有）" maxlength="32" autocomplete="off" />
+      </div>
       <div id="publicRooms" class="public-rooms hidden">
-        <div class="pr-head">公开房间</div>
+        <div class="pr-head">公开 / 我的房间</div>
         <div id="publicRoomsList" class="pr-list"></div>
       </div>
       <div id="accountHint" class="account-hint hidden"></div>
@@ -115,9 +127,14 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
         </button>
         <button id="btnLeave" class="btn-danger" title="离开房间">离开</button>
-        <button id="btnDestroyRoom" class="btn-destroy hidden" title="删除房间（仅房主）">删除房间</button>
+        <button id="btnDestroyRoom" class="btn-destroy hidden" title="删除房间（仅所有者）">删除房间</button>
       </div>
     </header>
+    <div id="roomOwnerOptions" class="room-owner-options hidden">
+      <label class="lobby-check"><input id="optRoomPublic" type="checkbox" /> 公开到大厅</label>
+      <label class="lobby-check"><input id="optRoomControlAnyone" type="checkbox" /> 全员可控制片源</label>
+      <button id="btnSaveRoomOptions" class="btn-sm-wide" type="button">保存房间设置</button>
+    </div>
 
     <!-- 聊天主页 -->
     <main class="main-layout">
@@ -414,10 +431,10 @@
               <span class="profile-row-label">原密码</span>
               <input id="profileOldPasswordInput" type="password" placeholder="修改/清空密码需先验证原密码" maxlength="64" autocomplete="off" />
             </div>
-            <p id="passwordStatus" class="profile-row-hint">未设置密码时，任何人凭你的昵称都能召回此账号——建议给自己起个不太重的昵称，或设个简单密码。</p>
+            <p id="passwordStatus" class="profile-row-hint">未设置密码时，知道昵称即可召回——建议设密码（至少 6 位）。敏感操作需要登录会话，不再仅凭 userId。</p>
 
             <div class="profile-divider"></div>
-            <p class="profile-row-hint">房间的改名与删除请在大厅房间列表中操作（房主行右侧有按钮）。</p>
+            <p class="profile-row-hint">房间删除仅所有者可操作；大厅列表右侧按钮同样需要登录会话。</p>
           </div>
 
           <button id="profileSave" class="btn-primary" type="button">保存资料</button>

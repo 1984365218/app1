@@ -12,6 +12,17 @@ Environment=HOST=127.0.0.1
 Environment=PORT=3000
 Environment=TRUST_PROXY=1
 Environment=DATA_DIR=/var/lib/watchparty
+# 生产务必改成你的 HTTPS 域名（逗号分隔多个）
+# Environment=CORS_ORIGIN=https://watch.example.com
+# Session 有效天数
+Environment=SESSION_TTL_DAYS=30
+# B 站代理（公网注意流量；关闭设 BILI_PROXY_ENABLED=0）
+Environment=BILI_PROXY_ENABLED=1
+Environment=BILI_PROXY_MAX_MB_PER_IP_HOUR=2048
+# 被踢后禁止再进（毫秒）
+Environment=KICK_BAN_MS=600000
+# 公网连麦请配置 TURN，例如：
+# Environment=ICE_SERVERS=[{"urls":"stun:stun.l.google.com:19302"},{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]
 ExecStart=/usr/bin/node server.js
 Restart=always
 RestartSec=3

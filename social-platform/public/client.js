@@ -1,14 +1,13 @@
 /* global io */
 /**
  * 一起看 · 前端逻辑
- *  - 房间：创建 / 加入 / 离开
+ *  - 房间：创建 / 加入 / 离开（Session 鉴权）
  *  - 双界面：聊天主页（气泡） + 观影模式（弹幕）
  *  - 聊天：主功能，支持文字 + 图片（图片以 base64 经服务端转发，端到端加密）
  *  - 共享视频：独立观影界面，本地播放，服务端仅同步 播放/暂停/跳转/进度
  *  - 连麦：WebRTC P2P 语音（完美协商 mesh）
  */
 
-const socket = io();
 let myPubKey = null; // 自己的 ECDH 公钥（base64），进入房间后广播
 const cryptoReadyWaiters = [];
 const STORAGE_KEY = 'watchparty:settings:v1';
@@ -35,15 +34,21 @@ const initialInviteRoom = parseInviteRoomFromUrl();
 // ---------- 全局状态 ----------
 let myId = null;
 let myName = savedSettings.userName || '';
+let sessionToken = savedSettings.sessionToken || '';
 let userProfile = {
   id: savedSettings.userId || createLocalUserId(),
   name: savedSettings.userName || '',
   avatar: savedSettings.avatar || '',
   avatarColor: savedSettings.avatarColor || '',
+  hasPassword: !!savedSettings.hasPassword,
 };
 let currentRoomId = null;
 let roomUsers = [];
 let isHost = false;
+let isOwner = false;
+let roomControlMode = 'host';
+let roomHasPassword = false;
+let roomVisibility = 'unlisted';
 let currentBiliQn = savedSettings.biliQn || '720P'; // 当前选中的 B 站清晰度
 
 let videoState = { url: '', fileName: '', bili: '', kind: '', iframeUrl: '', playing: false, currentTime: 0, lastControllerId: '', lastController: '' };
@@ -74,6 +79,62 @@ const peers = new Map();
 const remoteAudios = new Map();
 const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
+// Socket：带 session；token 刷新后通过 session:bind 同步
+const socket = io({
+  auth: { token: sessionToken || '' },
+  autoConnect: true,
+});
+
+function authHeaders(extra = {}) {
+  const h = { ...extra };
+  if (sessionToken) {
+    h.Authorization = `Bearer ${sessionToken}`;
+    h['X-Session-Token'] = sessionToken;
+  }
+  return h;
+}
+
+async function apiFetch(url, opts = {}) {
+  const headers = authHeaders(opts.headers || {});
+  if (opts.body && !headers['Content-Type'] && !(opts.body instanceof FormData)) {
+    headers['Content-Type'] = 'application/json';
+  }
+  const res = await fetch(url, { ...opts, headers });
+  if (res.status === 401) {
+    sessionToken = '';
+    saveSetting('sessionToken', '');
+    try { socket.auth = { token: '' }; } catch (e) {}
+  }
+  return res;
+}
+
+function setSessionToken(token) {
+  sessionToken = token || '';
+  saveSetting('sessionToken', sessionToken);
+  try {
+    socket.auth = { token: sessionToken };
+    if (socket.connected && sessionToken) {
+      socket.emit('session:bind', { token: sessionToken });
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function canControlVideoLocal() {
+  if (roomControlMode === 'anyone') return true;
+  return !!(isHost || isOwner);
+}
+
+async function loadRuntimeConfig() {
+  try {
+    const res = await apiFetch('/api/runtime-config');
+    const data = await res.json();
+    if (data && Array.isArray(data.iceServers) && data.iceServers.length) {
+      rtcConfig.iceServers = data.iceServers;
+    }
+  } catch (e) { /* keep fallback STUN */ }
+}
+loadRuntimeConfig();
+
 // ---------- DOM 助手 ----------
 const $ = (id) => document.getElementById(id);
 const lobby = $('lobby');
@@ -99,10 +160,14 @@ function createLocalUserId() {
 
 function persistProfile(profile = userProfile) {
   userProfile = { ...userProfile, ...profile };
+  if (profile && profile.sessionToken) setSessionToken(profile.sessionToken);
   saveSetting('userId', userProfile.id);
   saveSetting('userName', userProfile.name || '');
   saveSetting('avatar', userProfile.avatar || '');
   saveSetting('avatarColor', userProfile.avatarColor || '');
+  saveSetting('hasPassword', !!userProfile.hasPassword);
+  // 勿把 sessionToken 写进 userProfile 对象循环
+  if (userProfile.sessionToken) delete userProfile.sessionToken;
 }
 
 function avatarInitial(name) {
@@ -141,12 +206,16 @@ async function syncUserProfile({ silent = true } = {}) {
   myName = nextName;
   renderProfileUi();
   try {
-    const res = await fetch('/api/users/bootstrap', {
+    const res = await apiFetch('/api/users/bootstrap', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: userProfile.id, name: userProfile.name, avatar: userProfile.avatar }),
     });
     const data = await res.json();
+    if (res.status === 403 && data && data.code === 'PASSWORD_REQUIRED') {
+      // 本地 id 对应已设密账号但无 session：清空 id 让用户走昵称召回
+      if (!silent) alert(data.error || '请先通过昵称召回已设密账号');
+      return userProfile;
+    }
     if (!res.ok || data.error) throw new Error(data.error || 'profile failed');
     persistProfile(data);
     userProfile.hasPassword = !!data.hasPassword;
@@ -172,8 +241,8 @@ async function saveProfileFromPanel() {
 
 function readAvatarFile(file) {
   if (!file || !file.type.startsWith('image/')) return;
-  if (file.size > 512 * 1024) {
-    alert('头像请控制在 512KB 以内');
+  if (file.size > 200 * 1024) {
+    alert('头像请控制在 200KB 以内');
     return;
   }
   const reader = new FileReader();
@@ -242,15 +311,16 @@ function inviteLink(roomId) {
 initThemeControls();
 persistProfile(userProfile);
 renderProfileUi();
-syncUserProfile({ silent: true });
+syncUserProfile({ silent: true }).then(() => {
+  // 有会话后加载公开房 + 我拥有的房间
+  if (sessionToken) loadPublicRooms();
+});
 
 // 大厅首发：若本机已有保存昵称，就主动 lookup 一次，让旧账号提示自然浮现
 // （已自动入房的情况就不打扰——届时 setTimeout(joinRoom) 已经接管）
 if (myName && !initialInviteRoom) {
   setTimeout(() => { try { maybeLookupReclaim(); } catch (e) {} }, 0);
 }
-// 公开房间列表不在初始化时无条件加载——只有用户身份确认后（reclaimResolved=true）
-// 才在 maybeLookupReclaim / applyReclaimResult / 改用新账号 回调中刷新，避免未验证就看到房间
 
 $('avatarPick').addEventListener('click', () => $('avatarInput').click());
 $('profileAvatarPick').addEventListener('click', () => $('profileAvatarInput').click());
@@ -286,7 +356,7 @@ async function fetchJsonWithTimeout(url, opts = {}, ms = 8000) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), ms);
   try {
-    const res = await fetch(url, { ...opts, signal: ac.signal });
+    const res = await apiFetch(url, { ...opts, signal: ac.signal });
     return await res.json();
   } finally {
     clearTimeout(timer);
@@ -435,10 +505,9 @@ async function runReclaimForNoPassword() {
   const c = reclaimCandidate;
   if (!c) return;
   try {
-    const res = await fetch('/api/users/reclaim', {
+    const res = await apiFetch('/api/users/reclaim', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: c.id, password: '' }),
+      body: JSON.stringify({ reclaimToken: c.reclaimToken, password: '' }),
       signal: (() => { const a = new AbortController(); setTimeout(() => a.abort(), 8000); return a.signal; })(),
     });
     const data = await res.json();
@@ -464,10 +533,9 @@ async function runReclaimWithPassword() {
   const msgEl = $('ahMsg');
   const pw = pwdEl ? pwdEl.value : '';
   try {
-    const res = await fetch('/api/users/reclaim', {
+    const res = await apiFetch('/api/users/reclaim', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: c.id, password: pw }),
+      body: JSON.stringify({ reclaimToken: c.reclaimToken, password: pw }),
       signal: (() => { const a = new AbortController(); setTimeout(() => a.abort(), 8000); return a.signal; })(),
     });
     const data = await res.json();
@@ -496,13 +564,8 @@ function bindNewAccountBtn() {
 }
 
 function applyReclaimResult(data) {
-  // 把本机当前账号完整替换为召回到的旧账号
-  persistProfile({
-    id: data.id,
-    name: data.name || '',
-    avatar: data.avatar || '',
-    avatarColor: data.avatarColor || '',
-  });
+  // 把本机当前账号完整替换为召回到的旧账号（含 sessionToken）
+  if (data && data.sessionToken) setSessionToken(data.sessionToken);
   userProfile = {
     id: data.id,
     name: data.name,
@@ -510,6 +573,14 @@ function applyReclaimResult(data) {
     avatarColor: data.avatarColor || '',
     hasPassword: !!(data && data.hasPassword),
   };
+  persistProfile({
+    id: data.id,
+    name: data.name || '',
+    avatar: data.avatar || '',
+    avatarColor: data.avatarColor || '',
+    hasPassword: !!(data && data.hasPassword),
+    sessionToken: data.sessionToken,
+  });
   myName = data.name || myName;
   if ($('userName')) $('userName').value = userProfile.name; // 召回后昵称以服务端为准
   reclaimNeedPassword = false;
@@ -567,11 +638,11 @@ async function saveAccountPassword() {
   const pwd = $('profilePasswordInput') ? $('profilePasswordInput').value : '';
   // 已设密码时，修改/清空需先验证原密码（服务端 re-auth）
   const oldPwd = (userProfile.hasPassword && $('profileOldPasswordInput')) ? $('profileOldPasswordInput').value : '';
+  if (pwd && pwd.length < 6) { alert('密码至少 6 位'); return; }
   try {
-    const res = await fetch(`/api/users/${encodeURIComponent(userProfile.id)}/password`, {
+    const res = await apiFetch(`/api/users/${encodeURIComponent(userProfile.id)}/password`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ currentUserId: userProfile.id, password: pwd, oldPassword: oldPwd }),
+      body: JSON.stringify({ password: pwd, oldPassword: oldPwd }),
     });
     const data = await res.json();
     if (!res.ok || data.error) { alert(data.error || '密码保存失败'); return; }
@@ -585,19 +656,19 @@ async function saveAccountPassword() {
   }
 }
 
-// 统一的房间列表（大厅）：展示所有房间，房主可直接在行内改名/删除
+// 统一的房间列表：公开房间 + 我拥有的 unlisted 房间
 async function loadPublicRooms() {
   const wrap = $('publicRooms');
   const list = $('publicRoomsList');
   if (!wrap || !list) return;
   try {
-    const res = await fetch('/api/rooms?limit=20');
+    const res = await apiFetch('/api/rooms?limit=20');
     const data = await res.json();
     const rooms = (data && data.rooms) || [];
     if (!rooms.length) { wrap.classList.add('hidden'); return; }
     list.innerHTML = '';
     rooms.forEach((r) => {
-      const isMyRoom = r.hostUserId === userProfile.id;
+      const isMyRoom = (r.ownerUserId || r.hostUserId) === userProfile.id;
       const row = document.createElement('div');
       row.className = 'pr-row' + (r.id === currentRoomId ? ' current' : '') + (isMyRoom ? ' mine' : '');
       const online = r.online || 0;
@@ -607,13 +678,19 @@ async function loadPublicRooms() {
       go.innerHTML = `<span class="pr-name"></span><span class="pr-video"></span><span class="pr-meta"></span>`;
       go.querySelector('.pr-name').textContent = r.name || '未命名观影房';
       go.querySelector('.pr-video').textContent = vlabel ? `🎬 ${vlabel}` : '';
-      go.querySelector('.pr-meta').textContent = online > 0 ? `${online}人在线 · ${r.id}` : `无人 · ${r.id}`;
+      const flags = [
+        online > 0 ? `${online}人在线` : '无人',
+        r.id,
+        r.visibility === 'public' ? '公开' : '仅链接',
+        r.hasPassword ? '有密码' : '',
+      ].filter(Boolean).join(' · ');
+      go.querySelector('.pr-meta').textContent = flags;
       go.addEventListener('click', () => {
         if (r.id === currentRoomId) return;
         if ($('joinRoomId')) $('joinRoomId').value = r.id;
         if ($('btnJoin')) $('btnJoin').click();
       });
-      // 房主行：改名 + 删除
+      // 所有者：改名 + 删除
       const ops = row.querySelector('.pr-ops');
       if (isMyRoom) {
         const renameBtn = document.createElement('button');
@@ -623,9 +700,9 @@ async function loadPublicRooms() {
           const newName = prompt('输入新的房间名：', r.name || '观影房');
           if (newName === null) return;
           try {
-            const rr = await fetch(`/api/rooms/${encodeURIComponent(r.id)}/name`, {
-              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ userId: userProfile.id, name: newName.trim() }),
+            const rr = await apiFetch(`/api/rooms/${encodeURIComponent(r.id)}/name`, {
+              method: 'PATCH',
+              body: JSON.stringify({ name: newName.trim() }),
             });
             const rd = await rr.json();
             if (!rr.ok || rd.error) { alert(rd.error || '改名失败'); return; }
@@ -639,9 +716,9 @@ async function loadPublicRooms() {
           ev.stopPropagation();
           if (!confirm(`确定删除房间「${r.name || r.id}」？\n\n所有聊天记录将被永久清除。`)) return;
           try {
-            const rr = await fetch(`/api/rooms/${encodeURIComponent(r.id)}`, {
-              method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ userId: userProfile.id }),
+            const rr = await apiFetch(`/api/rooms/${encodeURIComponent(r.id)}`, {
+              method: 'DELETE',
+              body: JSON.stringify({}),
             });
             const rd = await rr.json();
             if (!rr.ok || rd.error) { alert(rd.error || '删除失败'); return; }
@@ -662,6 +739,8 @@ function logoutLocalAccount() {
   try {
     localStorage.removeItem(STORAGE_KEY);
   } catch (e) {}
+  sessionToken = '';
+  try { socket.auth = { token: '' }; } catch (e) {}
   // 重新初始化本地身份
   userProfile = {
     id: createLocalUserId(),
@@ -671,6 +750,7 @@ function logoutLocalAccount() {
   };
   myName = '';
   savedSettings.userId = userProfile.id;
+  savedSettings.sessionToken = '';
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(savedSettings)); } catch (e) {}
   renderProfileUi();
   if ($('profilePanel')) $('profilePanel').classList.add('hidden');
@@ -933,11 +1013,35 @@ async function prepareIdentity({ host = false } = {}) {
   }
 }
 
+function readCreateRoomOptions() {
+  const visibility = ($('roomVisibility') && $('roomVisibility').checked) ? 'public' : 'unlisted';
+  const controlMode = ($('roomControlAnyone') && $('roomControlAnyone').checked) ? 'anyone' : 'host';
+  const password = ($('roomPasswordInput') ? $('roomPasswordInput').value : '').trim();
+  return { visibility, controlMode, password };
+}
+
 async function createRoom() {
   // 用户从大厅主动创建：先确保召回闭环（已召回旧账号或确认新建）
   if (!(await ensureReclaimResolved())) return;
   await prepareIdentity({ host: true });
-  socket.emit('room:create', { roomName: ($('roomNameInput') ? $('roomNameInput').value.trim() : ''), userName: myName, userId: userProfile.id, avatar: userProfile.avatar }, (res) => {
+  if (!sessionToken) {
+    alert('登录会话未就绪，请刷新页面后重试');
+    return;
+  }
+  const opts = readCreateRoomOptions();
+  if (opts.password && opts.password.length < 4) {
+    alert('房间密码至少 4 位（可留空）');
+    return;
+  }
+  socket.emit('room:create', {
+    roomName: ($('roomNameInput') ? $('roomNameInput').value.trim() : ''),
+    userName: myName,
+    avatar: userProfile.avatar,
+    password: opts.password,
+    visibility: opts.visibility,
+    controlMode: opts.controlMode,
+  }, (res) => {
+    if (res && res.error) { alert(res.error); return; }
     if (res && res.user) {
       persistProfile(res.user);
       renderProfileUi();
@@ -957,21 +1061,56 @@ async function joinRoom(roomId, { auto = false } = {}) {
     if (!(await ensureReclaimResolved())) return;
   }
   await prepareIdentity();
-  socket.emit('room:join', { roomId: rid, userName: myName, userId: userProfile.id, avatar: userProfile.avatar }, (res) => {
-    if (res && res.user) {
-      persistProfile(res.user);
-      renderProfileUi();
-    }
-    if (res && res.error) {
-      if (!auto) alert(res.error);
-      else {
-        $('btnJoin').textContent = '重新加入';
-        alert(`没有找到房间 ${rid}，请确认邀请链接是否仍然有效。`);
+  if (!sessionToken) {
+    alert('登录会话未就绪，请刷新页面后重试');
+    return;
+  }
+  let password = ($('joinRoomPassword') ? $('joinRoomPassword').value : '').trim();
+  const tryJoin = (pwd) => {
+    socket.emit('room:join', {
+      roomId: rid,
+      userName: myName,
+      avatar: userProfile.avatar,
+      password: pwd || '',
+    }, (res) => {
+      if (res && res.user) {
+        persistProfile(res.user);
+        renderProfileUi();
       }
-      return;
-    }
-    enterRoom(rid);
-  });
+      if (res && res.error) {
+        if (res.passwordRequired || /密码/.test(res.error || '')) {
+          const again = prompt(res.error || '请输入房间密码', pwd || '');
+          if (again === null) return;
+          tryJoin(again);
+          return;
+        }
+        if (!auto) alert(res.error);
+        else {
+          $('btnJoin').textContent = '重新加入';
+          alert(`无法加入房间 ${rid}：${res.error}`);
+        }
+        return;
+      }
+      if (res && res.room) {
+        roomVisibility = res.room.visibility || 'unlisted';
+        roomControlMode = res.room.controlMode || 'host';
+        roomHasPassword = !!res.room.hasPassword;
+      }
+      enterRoom(rid);
+    });
+  };
+  tryJoin(password);
+}
+
+function updateOwnerHostUi() {
+  if ($('btnDestroyRoom')) $('btnDestroyRoom').classList.toggle('hidden', !isOwner);
+  if ($('roomName')) {
+    const canRename = isOwner || isHost;
+    $('roomName').classList.toggle('editable', canRename);
+    $('roomName').title = canRename ? '点击修改房间名' : '';
+  }
+  const opts = $('roomOwnerOptions');
+  if (opts) opts.classList.toggle('hidden', !isOwner);
 }
 
 function enterRoom(roomId, { created = false } = {}) {
@@ -983,15 +1122,13 @@ function enterRoom(roomId, { created = false } = {}) {
   $('roomName').textContent = inputName || '观影房';
   $('roomIdLabel').textContent = currentRoomId;
   $('btnCopy').title = '复制邀请链接';
-  // 房主才显示「删除房间」按钮，room:state 到达后按 isHost 精确切换
-  $('btnDestroyRoom').classList.toggle('hidden', !isHost);
-  $('roomName').classList.toggle('editable', isHost);
-  $('roomName').title = isHost ? '点击修改房间名' : '';
+  updateOwnerHostUi();
   if (history.replaceState) history.replaceState(null, '', `/r/${currentRoomId}`);
   socket.emit('crypto:pubkey', { pubKey: myPubKey });
   appendSystem(`🔒 聊天已端到端加密（ECDH + AES-GCM）`);
   appendSystem(`欢迎来到房间「${$('roomName').textContent}」。邀请链接已准备好，可以直接发给朋友。`);
   if (created) appendSystem('房间已创建。先加载一个视频，其他人进来后会自动看到当前状态。');
+  if (!canControlVideoLocal()) appendSystem('当前房间仅主持人可控制片源与播放进度。');
   renderEnvStatus();
   updateRoomHome();
 }
@@ -1059,16 +1196,30 @@ function waitForCryptoKey(timeoutMs = 1600) {
 // ===================================================================
 //  房间状态 & 用户列表
 // ===================================================================
-socket.on('room:state', ({ room, users, video, recentMessages, maxSeq } = {}) => {
-  $('roomName').textContent = room.name;
+function applyRoomMeta(roomMeta) {
+  if (!roomMeta) return;
+  if (roomMeta.visibility) roomVisibility = roomMeta.visibility;
+  if (roomMeta.controlMode) roomControlMode = roomMeta.controlMode;
+  if (typeof roomMeta.hasPassword === 'boolean') roomHasPassword = roomMeta.hasPassword;
+  if ($('optRoomPublic')) $('optRoomPublic').checked = roomVisibility === 'public';
+  if ($('optRoomControlAnyone')) $('optRoomControlAnyone').checked = roomControlMode === 'anyone';
+}
+
+socket.on('room:state', ({ room: roomMeta, users, video, recentMessages, maxSeq } = {}) => {
+  if (roomMeta) {
+    $('roomName').textContent = roomMeta.name;
+    applyRoomMeta(roomMeta);
+  }
   roomUsers = users;
   roomUsers.forEach((u) => userAudioLevels.set(u.id, u.level || 0));
   // 清理已不在房间内的用户的电平缓存，避免 Map 无限膨胀
   const presentIds = new Set(roomUsers.map((u) => u.id));
   for (const k of userAudioLevels.keys()) if (!presentIds.has(k)) userAudioLevels.delete(k);
-  isHost = !!users.find((u) => u.id === socket.id && u.isHost);
+  const me = users.find((u) => u.id === socket.id);
+  isHost = !!(me && me.isHost);
+  isOwner = !!(me && (me.isOwner || me.userId === (roomMeta && roomMeta.ownerUserId)));
   myId = socket.id;
-  $('btnDestroyRoom').classList.toggle('hidden', !isHost);
+  updateOwnerHostUi();
   ensureHostCryptoKey();
   renderUsers();
 
@@ -1093,12 +1244,13 @@ socket.on('room:users', (users) => {
   roomUsers = users;
   roomUsers.forEach((u) => userAudioLevels.set(u.id, u.level || userAudioLevels.get(u.id) || 0));
   const wasHost = isHost;
-  isHost = !!users.find((u) => u.id === socket.id && u.isHost);
-  $('btnDestroyRoom').classList.toggle('hidden', !isHost);
+  const me = users.find((u) => u.id === socket.id);
+  isHost = !!(me && me.isHost);
+  isOwner = !!(me && me.isOwner) || isOwner;
+  updateOwnerHostUi();
   renderUsers();
   updateRoomHome();
-  // 房主变更后重新协商群密钥：本端刚被推选为房主、但手上还没有群密钥时，生成新群密钥并广播 rekey，
-  // 让房间内其他人重新取回群密钥（避免"房主离开后新成员拿不到群密钥"）
+  // 主持人变更后重新协商群密钥
   if (isHost && !wasHost) ensureHostCryptoKey();
 });
 socket.on('user:join', ({ user }) => {
@@ -1116,7 +1268,7 @@ socket.on('user:leave', ({ id }) => {
   closePeer(id);
   if (u) appendSystem(`「${u.name}」离开了房间`);
 });
-// 房间被房主删除：清理本地状态，弹提示回大厅
+// 房间被所有者删除：清理本地状态，弹提示回大厅
 socket.on('room:destroyed', ({ roomId, by }) => {
   const isMe = by === socket.id;
   [...peers.keys()].forEach((id) => closePeer(id));
@@ -1125,12 +1277,31 @@ socket.on('room:destroyed', ({ roomId, by }) => {
   currentRoomId = null;
   roomUsers = [];
   isHost = false;
+  isOwner = false;
   resetReclaimState();
   room.classList.add('hidden');
   lobby.classList.remove('hidden');
   if (history.replaceState) history.replaceState(null, '', '/');
-  alert(isMe ? '房间已删除。' : '房间已被房主删除，你已返回大厅。');
+  alert(isMe ? '房间已删除。' : '房间已被所有者删除，你已返回大厅。');
   loadPublicRooms();
+});
+socket.on('user:kicked', ({ roomId, by }) => {
+  [...peers.keys()].forEach((id) => closePeer(id));
+  if (localStream) { localStream.getTracks().forEach((t) => t.stop()); localStream = null; }
+  stopLocalMeter();
+  currentRoomId = null;
+  roomUsers = [];
+  isHost = false;
+  isOwner = false;
+  room.classList.add('hidden');
+  lobby.classList.remove('hidden');
+  if (history.replaceState) history.replaceState(null, '', '/');
+  alert(`你已被${by ? `「${by}」` : ''}移出房间。`);
+  loadPublicRooms();
+});
+socket.on('room:options', (opts) => {
+  applyRoomMeta(opts || {});
+  appendSystem(`房间设置已更新：${roomVisibility === 'public' ? '公开' : '仅链接'} · 播控 ${roomControlMode === 'anyone' ? '全员' : '仅主持人'}`);
 });
 // 房主改名后，房内所有人收到新房间名同步更新顶栏
 socket.on('room:renamed', ({ name }) => {
@@ -1218,10 +1389,15 @@ function renderUsers() {
       me.textContent = '（我）';
       meta.appendChild(me);
     }
-    if (u.isHost) {
+    if (u.isOwner) {
       const t = document.createElement('span');
       t.className = 'tag-host';
-      t.textContent = '房主';
+      t.textContent = '所有者';
+      meta.appendChild(t);
+    } else if (u.isHost) {
+      const t = document.createElement('span');
+      t.className = 'tag-host';
+      t.textContent = '主持人';
       meta.appendChild(t);
     }
     body.appendChild(meta);
@@ -1243,6 +1419,21 @@ function renderUsers() {
     meter.appendChild(fill);
     audioLine.appendChild(meter);
     body.appendChild(audioLine);
+
+    if (u.id !== myId && (isHost || isOwner) && !u.isOwner) {
+      const kickBtn = document.createElement('button');
+      kickBtn.type = 'button';
+      kickBtn.className = 'member-kick';
+      kickBtn.textContent = '踢出';
+      kickBtn.title = '移出房间';
+      kickBtn.addEventListener('click', () => {
+        if (!confirm(`确定将「${u.name}」移出房间？`)) return;
+        socket.emit('room:kick', { targetSocketId: u.id }, (res) => {
+          if (res && res.error) alert(res.error);
+        });
+      });
+      body.appendChild(kickBtn);
+    }
 
     if (u.id !== myId) {
       const pref = getRemoteAudioPref(u.id);
@@ -1817,6 +2008,7 @@ function setIframeSource(info) {
   showIframeFrame(info.embedUrl);
   $('videoHint').textContent = `嵌入视频：${lastVideoTitle}（播放控制不同步，各自在自己的播放器里看，可一起聊天）`;
   $('watchTitle').textContent = lastVideoTitle;
+  if (!canControlVideoLocal()) { alert('仅主持人可更换片源'); return; }
   socket.emit('video:set', { kind: 'iframe', iframeUrl: info.embedUrl, label: lastVideoTitle, iframeProvider: info.provider || '', url: '', bili: '', fileName: '' });
   $('watchLoadPanel').classList.add('hidden');
   watchEmpty.classList.add('hidden');
@@ -1829,6 +2021,7 @@ function setHlsSource(url) {
   hideIframeFrame();
   // 不引入第三方库：Safari 原生支持 m3u8；其它浏览器尝试用 <video src>，
   // 浏览器会自己决定能不能解；不支持的视频会触发 error。
+  if (!canControlVideoLocal()) { alert('仅主持人可更换片源'); return; }
   socket.emit('video:set', { kind: 'hls', url, bili: '', fileName: '', iframeUrl: '' });
   $('watchLoadPanel').classList.add('hidden');
   if (video.src !== url) video.src = url;
@@ -1848,6 +2041,7 @@ function setVideoUrlSource(url) {
   // 默认 direct：交给 <video> 直链解码
   stopDash();
   hideIframeFrame();
+  if (!canControlVideoLocal()) { alert('仅主持人可更换片源'); return; }
   socket.emit('video:set', { kind: 'direct', url: info.url, fileName: '', bili: '', iframeUrl: '' });
   $('watchLoadPanel').classList.add('hidden');
   if ($('roomVideoUrl')) $('roomVideoUrl').value = info.url;
@@ -1859,6 +2053,7 @@ function setLocalFileSource(file) {
   stopDash();
   hideIframeFrame();
   useLocalFile(file);
+  if (!canControlVideoLocal()) { alert('仅主持人可更换片源'); return; }
   socket.emit('video:set', { kind: 'file', url: '', fileName: file.name, bili: '', iframeUrl: '' });
   $('watchLoadPanel').classList.add('hidden');
 }
@@ -1871,6 +2066,7 @@ function setBiliSource(url) {
   hideIframeFrame();
   $('biliUrl').value = url;
   $('roomBiliUrl').value = url;
+  if (!canControlVideoLocal()) { alert('仅主持人可更换片源'); return; }
   socket.emit('video:set', { kind: 'bili', url: '', fileName: '', bili: m[0], iframeUrl: '' });
   $('watchLoadPanel').classList.add('hidden');
 }
@@ -2083,6 +2279,7 @@ video.addEventListener('timeupdate', () => {
 });
 
 function emitAction(action) {
+  if (!canControlVideoLocal()) return;
   socket.emit('video:action', { action, time: video.currentTime });
 }
 
@@ -2106,9 +2303,9 @@ function updateControllerTag(by) {
   else tag.classList.add('hidden');
 }
 
-// 周期纠偏：仅控制者发起
+// 周期纠偏：仅控制者/主持人发起
 setInterval(() => {
-  if (controllerId === myId && !video.paused && videoState.playing) {
+  if (controllerId === myId && canControlVideoLocal() && !video.paused && videoState.playing) {
     socket.emit('video:sync', { time: video.currentTime });
   }
 }, 5000);
@@ -2428,16 +2625,16 @@ function closePeer(id) {
 // ===================================================================
 $('btnLeave').addEventListener('click', leave);
 $('btnDestroyRoom').addEventListener('click', async () => {
-  if (!currentRoomId || !isHost) return;
+  if (!currentRoomId || !isOwner) return;
   if (!confirm(`确定删除房间「${$('roomName').textContent}」？\n\n房间内的所有聊天记录和成员记录将被永久清除，无法恢复。`)) return;
   socket.emit('room:destroy', (res) => {
     if (res && res.error) { alert(res.error); return; }
     // 删除成功：room:destroyed 事件会负责清理 UI 并回大厅
   });
 });
-// 房主点击顶栏房间名即可改名（socket 事件，房内实时同步）
+// 所有者/主持人点击顶栏房间名即可改名
 $('roomName').addEventListener('click', () => {
-  if (!currentRoomId || !isHost) return;
+  if (!currentRoomId || !(isOwner || isHost)) return;
   const old = $('roomName').textContent;
   const newName = prompt('修改房间名：', old);
   if (newName === null) return;
@@ -2448,6 +2645,18 @@ $('roomName').addEventListener('click', () => {
   });
 });
 $('btnCopy').addEventListener('click', () => copyInviteLink());
+if ($('btnSaveRoomOptions')) {
+  $('btnSaveRoomOptions').addEventListener('click', () => {
+    if (!isOwner || !currentRoomId) return;
+    socket.emit('room:set-options', {
+      visibility: ($('optRoomPublic') && $('optRoomPublic').checked) ? 'public' : 'unlisted',
+      controlMode: ($('optRoomControlAnyone') && $('optRoomControlAnyone').checked) ? 'anyone' : 'host',
+    }, (res) => {
+      if (res && res.error) alert(res.error);
+      else if (res && res.room) applyRoomMeta(res.room);
+    });
+  });
+}
 // 复制文本：优先用 navigator.clipboard（仅安全上下文可用），否则降级到 execCommand（http://IP 明文 context 也可用）
 function copyInviteLink() {
   copyText(inviteLink(currentRoomId), '邀请链接已复制：');
