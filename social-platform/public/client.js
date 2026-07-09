@@ -886,11 +886,13 @@ renderEnvStatus();
 
 // ===================================================================
 //  端到端加密（ECDH P-256 + AES-GCM 群密钥）
+//  群密钥仅存在客户端；同账号同浏览器会把房间密钥缓存在 localStorage，
+//  以便重进房能解密自己曾参与会话的历史消息（换设备/清缓存仍无法解密，属 E2E 预期）。
 // ===================================================================
 const cqCrypto = (() => {
   let ecdhPriv = null;
   let groupKey = null;
-  const privCache = new Map();
+  let boundRoomId = '';
 
   const enc = new TextEncoder();
   const dec = new TextDecoder();
@@ -906,6 +908,10 @@ const cqCrypto = (() => {
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     return bytes.buffer;
+  }
+
+  function roomKeyStorageKey(roomId, userId) {
+    return `watchparty:roomKey:v1:${userId || 'anon'}:${normalizeRoomId(roomId)}`;
   }
 
   async function initLocal() {
@@ -939,7 +945,32 @@ const cqCrypto = (() => {
     const iv = b64d(env.iv);
     const ct = b64d(env.ct);
     const rawGroup = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, shared, ct);
-    groupKey = await crypto.subtle.importKey('raw', rawGroup, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+    groupKey = await crypto.subtle.importKey('raw', rawGroup, { name: 'AES-GCM' }, true, ['encrypt', 'decrypt']);
+  }
+  async function persistRoomKey(roomId, userId) {
+    if (!groupKey || !roomId || !userId) return;
+    try {
+      const raw = await crypto.subtle.exportKey('raw', groupKey);
+      localStorage.setItem(roomKeyStorageKey(roomId, userId), b64(raw));
+      boundRoomId = normalizeRoomId(roomId);
+    } catch (e) { console.warn('persist room key failed', e); }
+  }
+  async function restoreRoomKey(roomId, userId) {
+    if (!roomId || !userId) return false;
+    try {
+      const stored = localStorage.getItem(roomKeyStorageKey(roomId, userId));
+      if (!stored) return false;
+      groupKey = await crypto.subtle.importKey('raw', b64d(stored), { name: 'AES-GCM' }, true, ['encrypt', 'decrypt']);
+      boundRoomId = normalizeRoomId(roomId);
+      return true;
+    } catch (e) {
+      console.warn('restore room key failed', e);
+      return false;
+    }
+  }
+  function clearMemoryKey() {
+    groupKey = null;
+    boundRoomId = '';
   }
   async function encrypt(text) {
     if (!groupKey) throw new Error('群密钥未就绪');
@@ -948,17 +979,23 @@ const cqCrypto = (() => {
     return b64(iv) + ':' + b64(ct);
   }
   async function decrypt(payload) {
-    if (!groupKey) return '[等待密钥…]';
-    const [ivB64, ctB64] = payload.split(':');
-    if (!ivB64 || !ctB64) return payload;
+    if (!groupKey) {
+      const err = new Error('NO_GROUP_KEY');
+      err.code = 'NO_GROUP_KEY';
+      throw err;
+    }
+    const [ivB64, ctB64] = String(payload || '').split(':');
+    if (!ivB64 || !ctB64) return String(payload || '');
     const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(ivB64) }, groupKey, b64d(ctB64));
     return dec.decode(pt);
   }
 
   return {
     initLocal, createGroupKey, wrapGroupKey, unwrapGroupKey,
+    persistRoomKey, restoreRoomKey, clearMemoryKey,
     encrypt, decrypt,
     hasKey: () => !!groupKey,
+    boundRoomId: () => boundRoomId,
   };
 })();
 
@@ -1124,6 +1161,15 @@ function enterRoom(roomId, { created = false } = {}) {
   $('btnCopy').title = '复制邀请链接';
   updateOwnerHostUi();
   if (history.replaceState) history.replaceState(null, '', `/r/${currentRoomId}`);
+  // 创建房时 prepareIdentity 已生成群密钥：立刻按房间缓存，便于下次同号重进解密
+  if (cqCrypto.hasKey() && userProfile.id) {
+    cqCrypto.persistRoomKey(currentRoomId, userProfile.id).catch(() => {});
+  } else if (userProfile.id) {
+    // 重进房：先尝试本机密钥，再发公钥做协商
+    cqCrypto.restoreRoomKey(currentRoomId, userProfile.id).then((ok) => {
+      if (ok) notifyCryptoReady();
+    }).catch(() => {});
+  }
   socket.emit('crypto:pubkey', { pubKey: myPubKey });
   appendSystem(`🔒 聊天已端到端加密（ECDH + AES-GCM）`);
   appendSystem(`欢迎来到房间「${$('roomName').textContent}」。邀请链接已准备好，可以直接发给朋友。`);
@@ -1150,6 +1196,7 @@ socket.on('crypto:groupkey', async ({ fromId, pubKey, env }) => {
   if (!env) return;
   try {
     await cqCrypto.unwrapGroupKey(pubKey || myPubKey, env);
+    if (currentRoomId && userProfile.id) await cqCrypto.persistRoomKey(currentRoomId, userProfile.id);
     notifyCryptoReady();
     appendSystem('🔑 加密通道已建立');
   } catch (e) { console.error('unwrap group key failed', e); }
@@ -1160,15 +1207,57 @@ socket.on('crypto:rekey', () => {
 });
 
 async function ensureHostCryptoKey() {
-  if (!isHost || cqCrypto.hasKey()) return;
+  if (cqCrypto.hasKey()) {
+    if (currentRoomId && userProfile.id) await cqCrypto.persistRoomKey(currentRoomId, userProfile.id);
+    return;
+  }
+  // 同账号重进：优先恢复本机缓存的房间群密钥，才能解密历史
+  if (currentRoomId && userProfile.id) {
+    const ok = await cqCrypto.restoreRoomKey(currentRoomId, userProfile.id);
+    if (ok) {
+      notifyCryptoReady();
+      return;
+    }
+  }
+  if (!isHost) return;
   try {
     await cqCrypto.createGroupKey();
+    if (currentRoomId && userProfile.id) await cqCrypto.persistRoomKey(currentRoomId, userProfile.id);
     notifyCryptoReady();
     socket.emit('crypto:rekey');
     appendSystem('🔑 已为房主建立新的加密通道');
   } catch (e) {
     console.error('create host group key failed', e);
   }
+}
+
+function isMyChatMessage(m) {
+  if (!m) return false;
+  if (m.self === true) return true;
+  if (m.userId && userProfile.id && m.userId === userProfile.id) return true;
+  return false;
+}
+
+async function renderRecentMessages(recentMessages) {
+  const box = $('chatMessages');
+  if (!box || !Array.isArray(recentMessages)) return;
+  box.innerHTML = '';
+  // 先恢复/协商密钥，再渲染，避免历史先显示「等待密钥」
+  if (currentRoomId && userProfile.id && !cqCrypto.hasKey()) {
+    await cqCrypto.restoreRoomKey(currentRoomId, userProfile.id);
+  }
+  if (!cqCrypto.hasKey()) await ensureHostCryptoKey();
+  if (!cqCrypto.hasKey() && myPubKey) socket.emit('crypto:pubkey', { pubKey: myPubKey });
+  if (!cqCrypto.hasKey()) await waitForCryptoKey(2800);
+
+  for (const m of recentMessages) {
+    await insertChatMessage(m, {
+      selfOverride: isMyChatMessage(m),
+      skipScroll: true,
+      skipDanmaku: true,
+    });
+  }
+  box.scrollTop = box.scrollHeight;
 }
 
 function notifyCryptoReady() {
@@ -1220,7 +1309,6 @@ socket.on('room:state', ({ room: roomMeta, users, video, recentMessages, maxSeq 
   isOwner = !!(me && (me.isOwner || me.userId === (roomMeta && roomMeta.ownerUserId)));
   myId = socket.id;
   updateOwnerHostUi();
-  ensureHostCryptoKey();
   renderUsers();
 
   videoState = { ...videoState, ...video };
@@ -1231,13 +1319,10 @@ socket.on('room:state', ({ room: roomMeta, users, video, recentMessages, maxSeq 
   updateWatchCta();
   updateRoomHome();
 
-  // 聊天历史：服务端下发最近一批密文。能解则显示明文，不能解（端到端 / 密钥已轮换）显示占位。
-  if (Array.isArray(recentMessages)) {
-    const box = $('chatMessages');
-    if (box) box.innerHTML = '';
-    recentMessages.forEach((m) => insertChatMessage(m, { selfOverride: false, skipScroll: true, skipDanmaku: true }));
-    if (box) box.scrollTop = box.scrollHeight;
-  }
+  // 聊天历史：先恢复密钥再解密；按 userId 判断是否自己的气泡（靠右）
+  renderRecentMessages(Array.isArray(recentMessages) ? recentMessages : []).catch((e) => {
+    console.error('render recent messages failed', e);
+  });
 });
 socket.on('room:users', (users) => {
   myId = socket.id;
@@ -1573,15 +1658,15 @@ async function sendChat() {
 socket.on('chat:message', async (m) => insertChatMessage(m));
 
 // 通用渲染：实时消息 socket.on('chat:message') 与历史消息 recentMessages 都走这里。
-// m = { user, ts, cipher, seq?, self? }
+// m = { user, userId?, ts, cipher, seq?, self? }
 // opts:
-//   - selfOverride: 强制左右对齐（历史消息不知道是发送者本人还是别人，按需要传入）
-//   - skipScroll:   连续插入多条时不每次都滚到底（最后再统一滚一次）
+//   - selfOverride: 强制左右对齐
+//   - skipScroll:   连续插入多条时不每次都滚到底
 //   - skipDanmaku:  历史消息不当作实时弹幕飘出
 async function insertChatMessage(m, opts = {}) {
   const box = $('chatMessages');
   if (!box) return;
-  const self = (typeof opts.selfOverride === 'boolean') ? opts.selfOverride : !!m.self;
+  const self = (typeof opts.selfOverride === 'boolean') ? opts.selfOverride : isMyChatMessage(m);
   const el = document.createElement('div');
   el.className = 'msg' + (self ? ' self' : '');
   const t = new Date(m.ts);
@@ -1610,11 +1695,27 @@ async function insertChatMessage(m, opts = {}) {
   box.appendChild(el);
   if (!opts.skipScroll) box.scrollTop = box.scrollHeight;
 
+  // 密钥尚未就绪时等一会，避免直接显示「等待密钥」
+  if (!cqCrypto.hasKey()) {
+    if (currentRoomId && userProfile.id) await cqCrypto.restoreRoomKey(currentRoomId, userProfile.id);
+    if (!cqCrypto.hasKey()) await waitForCryptoKey(2200);
+  }
+
   let plain;
-  try { plain = await cqCrypto.decrypt(m.cipher); }
-  catch (e) {
-    loading.textContent = (opts.skipDanmaku ? '🔒 历史消息（无法解密）' : '⚠️ 解密失败');
+  try {
+    plain = await cqCrypto.decrypt(m.cipher);
+  } catch (e) {
+    if (e && e.code === 'NO_GROUP_KEY') {
+      loading.textContent = '🔑 等待加密密钥…';
+    } else {
+      loading.textContent = (opts.skipDanmaku ? '🔒 历史消息（无法解密）' : '⚠️ 解密失败');
+    }
     if (!opts.skipScroll) box.scrollTop = box.scrollHeight;
+    return;
+  }
+  // 明文若仍是旧占位串，按失败处理
+  if (plain === '[等待密钥…]') {
+    loading.textContent = '🔑 等待加密密钥…';
     return;
   }
   let data;

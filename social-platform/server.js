@@ -1025,17 +1025,23 @@ app.get('/api/rooms/:id/messages', async (req, res) => {
     let rows;
     if (Number.isFinite(fromSeq) && fromSeq > 0) {
       rows = dbAll(
-        'SELECT seq, user_name, cipher, created_at FROM messages WHERE room_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?',
+        'SELECT seq, user_id, user_name, cipher, created_at FROM messages WHERE room_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?',
         [rid, fromSeq, limit]
       );
     } else {
       rows = dbAll(
-        'SELECT seq, user_name, cipher, created_at FROM messages WHERE room_id = ? ORDER BY seq DESC LIMIT ?',
+        'SELECT seq, user_id, user_name, cipher, created_at FROM messages WHERE room_id = ? ORDER BY seq DESC LIMIT ?',
         [rid, limit]
       );
     }
     rows.reverse();
-    const out = rows.map((r) => ({ seq: r.seq, user: r.user_name || '匿名', ts: r.created_at, cipher: r.cipher }));
+    const out = rows.map((r) => ({
+      seq: r.seq,
+      userId: r.user_id || '',
+      user: r.user_name || '匿名',
+      ts: r.created_at,
+      cipher: r.cipher,
+    }));
     res.json({ messages: out });
   } catch (e) {
     res.status(500).json({ error: 'history fetch failed' });
@@ -1430,9 +1436,15 @@ io.on('connection', (socket) => {
       upsertRoomMember({ roomId: rid, userId: profile.id, displayName: profile.name || '', isHost: user.isHost || user.isOwner });
       socket.to(rid).emit('user:join', { user });
       const recent = dbAll(
-        'SELECT seq, user_name, cipher, created_at FROM messages WHERE room_id = ? ORDER BY seq DESC LIMIT 50',
+        'SELECT seq, user_id, user_name, cipher, created_at FROM messages WHERE room_id = ? ORDER BY seq DESC LIMIT 50',
         [rid]
-      ).reverse().map((r) => ({ seq: r.seq, user: r.user_name || '匿名', ts: r.created_at, cipher: r.cipher }));
+      ).reverse().map((r) => ({
+        seq: r.seq,
+        userId: r.user_id || '',
+        user: r.user_name || '匿名',
+        ts: r.created_at,
+        cipher: r.cipher,
+      }));
       socket.emit('room:state', {
         room: publicRoom(room),
         users: [...room.users.values()],
@@ -1676,6 +1688,7 @@ io.on('connection', (socket) => {
     const message = {
       id: `${ts}-${Math.random().toString(36).slice(2, 6)}`,
       user: u ? u.name : '匿名',
+      userId: u ? u.userId : '',
       ts,
       cipher,
       seq,
