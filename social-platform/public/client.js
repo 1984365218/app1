@@ -326,8 +326,11 @@ $('avatarPick').addEventListener('click', () => $('avatarInput').click());
 $('profileAvatarPick').addEventListener('click', () => $('profileAvatarInput').click());
 $('avatarInput').addEventListener('change', (e) => { readAvatarFile(e.target.files[0]); e.target.value = ''; });
 $('profileAvatarInput').addEventListener('change', (e) => { readAvatarFile(e.target.files[0]); e.target.value = ''; });
-$('openProfileLobby').addEventListener('click', () => { renderProfileUi(); $('profilePanel').classList.remove('hidden'); });
-$('btnProfile').addEventListener('click', () => { renderProfileUi(); $('profilePanel').classList.remove('hidden'); });
+$('openProfileLobby').addEventListener('click', () => {
+  renderProfileUi();
+  if (typeof renderProfileAccountBox === 'function') renderProfileAccountBox();
+  $('profilePanel').classList.remove('hidden');
+});
 $('profileClose').addEventListener('click', () => $('profilePanel').classList.add('hidden'));
 $('profileSave').addEventListener('click', saveProfileFromPanel);
 
@@ -771,11 +774,30 @@ if ($('btnSavePassword')) $('btnSavePassword').addEventListener('click', saveAcc
 if ($('btnLogoutAccount')) $('btnLogoutAccount').addEventListener('click', logoutLocalAccount);
 
 // 打开账号中心时刷新账号信息
-$('btnProfile').addEventListener('click', () => {
-  renderProfileUi();
-  renderProfileAccountBox();
-  $('profilePanel').classList.remove('hidden');
-});
+if ($('btnProfile')) {
+  $('btnProfile').addEventListener('click', () => {
+    closeRoomMore();
+    renderProfileUi();
+    renderProfileAccountBox();
+    $('profilePanel').classList.remove('hidden');
+  });
+}
+
+// ---------- Toast（非阻断反馈） ----------
+function showToast(message, { error = false, ms = 2600 } = {}) {
+  const host = $('toastHost');
+  if (!host || !message) return;
+  const el = document.createElement('div');
+  el.className = 'toast' + (error ? ' err' : '');
+  el.textContent = String(message);
+  host.appendChild(el);
+  setTimeout(() => {
+    el.style.opacity = '0';
+    el.style.transition = 'opacity .2s';
+    setTimeout(() => el.remove(), 220);
+  }, ms);
+}
+
 function setMobileRoomPanel(panel = 'source') {
   const next = panel === 'audio' ? 'audio' : 'source';
   const side = $('roomSide');
@@ -787,12 +809,121 @@ function setMobileRoomPanel(panel = 'source') {
   });
   saveSetting('mobileRoomPanel', next);
 }
+
+function openRoomSideSheet(panel) {
+  const side = $('roomSide');
+  if (!side) return;
+  if (panel === 'source' || panel === 'audio') setMobileRoomPanel(panel);
+  side.classList.add('sheet-open');
+  side.dataset.mobileSheet = 'open';
+}
+
+function closeRoomSideSheet() {
+  const side = $('roomSide');
+  if (!side) return;
+  side.classList.remove('sheet-open');
+  side.dataset.mobileSheet = 'closed';
+  document.querySelectorAll('.room-bottom-nav .rnav').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.roomNav === 'chat');
+  });
+}
+
+function setRoomNav(nav) {
+  const next = nav || 'chat';
+  document.querySelectorAll('.room-bottom-nav .rnav').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.roomNav === next);
+  });
+  if (next === 'chat') {
+    closeRoomSideSheet();
+    closeRoomMore();
+    return;
+  }
+  if (next === 'source' || next === 'audio') {
+    closeRoomMore();
+    openRoomSideSheet(next);
+    return;
+  }
+  if (next === 'more') {
+    closeRoomSideSheet();
+    toggleRoomMore(true);
+  }
+}
+
+function closeRoomMore() {
+  const panel = $('roomMorePanel');
+  const btn = $('btnRoomMore');
+  if (panel) panel.classList.add('hidden');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+
+function toggleRoomMore(forceOpen) {
+  const panel = $('roomMorePanel');
+  const btn = $('btnRoomMore');
+  if (!panel) return;
+  const open = forceOpen === true ? true : forceOpen === false ? false : panel.classList.contains('hidden');
+  panel.classList.toggle('hidden', !open);
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
 document.querySelectorAll('[data-mobile-room-panel]').forEach((button) => {
-  button.addEventListener('click', () => setMobileRoomPanel(button.dataset.mobileRoomPanel));
+  button.addEventListener('click', () => {
+    setMobileRoomPanel(button.dataset.mobileRoomPanel);
+    openRoomSideSheet(button.dataset.mobileRoomPanel);
+  });
 });
 setMobileRoomPanel(savedSettings.mobileRoomPanel || 'source');
 
-// 大厅：创建 / 加入 分区切换，减少同屏字段
+document.querySelectorAll('[data-room-nav]').forEach((btn) => {
+  btn.addEventListener('click', () => setRoomNav(btn.dataset.roomNav));
+});
+if ($('btnCloseRoomSide')) $('btnCloseRoomSide').addEventListener('click', closeRoomSideSheet);
+if ($('btnRoomMore')) {
+  $('btnRoomMore').addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleRoomMore();
+  });
+}
+if ($('btnMembersFromChat')) {
+  $('btnMembersFromChat').addEventListener('click', () => {
+    if ($('membersDrawer')) $('membersDrawer').classList.remove('hidden');
+  });
+}
+document.addEventListener('click', (e) => {
+  const more = $('roomMorePanel');
+  const btn = $('btnRoomMore');
+  if (!more || more.classList.contains('hidden')) return;
+  if (more.contains(e.target) || (btn && btn.contains(e.target))) return;
+  closeRoomMore();
+});
+
+// 观影加载面板：B 站 / 链接 / 本地 视觉分段
+document.querySelectorAll('[data-load-tab]').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    const key = tab.dataset.loadTab;
+    document.querySelectorAll('[data-load-tab]').forEach((t) => t.classList.toggle('active', t === tab));
+    document.querySelectorAll('[data-load-pane]').forEach((pane) => {
+      pane.classList.toggle('hidden', pane.dataset.loadPane !== key);
+    });
+  });
+});
+
+// 观影控制条：空闲自动隐藏
+(() => {
+  const stage = $('watchStage');
+  const controls = $('watchControls');
+  if (!stage || !controls) return;
+  let hideTimer = 0;
+  const bump = () => {
+    controls.classList.add('show');
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => controls.classList.remove('show'), 2500);
+  };
+  ['pointermove', 'pointerdown', 'touchstart'].forEach((ev) => {
+    stage.addEventListener(ev, bump, { passive: true });
+  });
+})();
+
+// 大厅：创建 / 加入 分区切换
 function setLobbyTab(tab) {
   const next = tab === 'join' ? 'join' : 'create';
   document.querySelectorAll('[data-lobby-tab]').forEach((btn) => {
@@ -1193,10 +1324,10 @@ function enterRoom(roomId, { created = false } = {}) {
     }).catch(() => {});
   }
   socket.emit('crypto:pubkey', { pubKey: myPubKey });
-  appendSystem(`🔒 聊天已端到端加密（ECDH + AES-GCM）`);
-  appendSystem(`欢迎来到房间「${$('roomName').textContent}」。邀请链接已准备好，可以直接发给朋友。`);
-  if (created) appendSystem('房间已创建。先加载一个视频，其他人进来后会自动看到当前状态。');
-  if (!canControlVideoLocal()) appendSystem('当前房间仅主持人可控制片源与播放进度。');
+  appendSystem(`欢迎来到「${$('roomName').textContent}」· 聊天已加密`);
+  appendSystem('点右上角「一起看」观影；「更多 → 复制邀请链接」喊朋友进来。');
+  if (created) appendSystem('房间已建好。可先在右侧加载视频，朋友进房会自动跟上。');
+  if (!canControlVideoLocal()) appendSystem('片源与进度由主持人控制。');
   renderEnvStatus();
   updateRoomHome();
 }
@@ -1819,23 +1950,27 @@ function hasVideoSource() {
 function updateRoomHome() {
   const has = hasVideoSource();
   const label = sourceLabel();
-  $('roomHeroTitle').textContent = has ? '片源已就绪' : '准备片源，邀请朋友入座';
-  $('roomHeroMeta').textContent = has ? label : '聊天和邀请链接已经可用。';
-  $('heroSourceState').textContent = has ? label : '未设置';
+  if ($('roomHeroTitle')) $('roomHeroTitle').textContent = has ? '片源已就绪' : '还没有片源';
+  if ($('roomHeroMeta')) $('roomHeroMeta').textContent = has ? label : '先邀请朋友，或加载视频一起看。';
+  if ($('heroSourceState')) $('heroSourceState').textContent = has ? label : '未设置';
   const activeMicCount = roomUsers.filter((u) => u.audio).length;
-  $('heroMicState').textContent = activeMicCount ? `${activeMicCount} 人开麦` : (micOn ? '已开启' : '未开启');
-  $('heroUserCount').textContent = roomUsers.length;
-  $('roomOpenWatchText').textContent = has ? '进入观影' : '选择片源';
-  $('roomSourceWatch').textContent = has ? '观影页' : '待片源';
-  $('roomSourceHint').textContent = has ? `当前片源：${label}` : '支持 B 站链接、视频直链和本地同名文件。';
+  if ($('heroMicState')) $('heroMicState').textContent = activeMicCount ? `${activeMicCount} 人` : (micOn ? '已开' : '未开');
+  if ($('heroUserCount')) $('heroUserCount').textContent = roomUsers.length;
+  if ($('roomOpenWatchText')) $('roomOpenWatchText').textContent = has ? '进入观影' : '去选片源';
+  if ($('roomSourceWatch')) $('roomSourceWatch').textContent = has ? '观影' : '观影';
+  if ($('roomSourceHint')) $('roomSourceHint').textContent = has ? `当前：${label}` : '粘贴 B 站链接，或选本地文件';
 }
 
 function focusRoomSource() {
+  if (window.matchMedia && window.matchMedia('(max-width: 900px)').matches) {
+    setRoomNav('source');
+  }
   const panel = $('roomSourcePanel');
+  if (!panel) return;
   panel.classList.add('source-pulse');
   panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   setTimeout(() => panel.classList.remove('source-pulse'), 900);
-  setTimeout(() => $('roomBiliUrl').focus(), 120);
+  setTimeout(() => { if ($('roomBiliUrl')) $('roomBiliUrl').focus(); }, 120);
 }
 
 function openWatchOrSource() {
@@ -2782,10 +2917,14 @@ if ($('btnSaveRoomOptions')) {
 }
 // 复制文本：优先用 navigator.clipboard（仅安全上下文可用），否则降级到 execCommand（http://IP 明文 context 也可用）
 function copyInviteLink() {
-  copyText(inviteLink(currentRoomId), '邀请链接已复制：');
+  closeRoomMore();
+  copyText(inviteLink(currentRoomId), '邀请链接已复制');
 }
-function copyText(text, label = '已复制：') {
-  const done = () => alert(label + text);
+function copyText(text, label = '已复制') {
+  const done = () => {
+    if (typeof showToast === 'function') showToast(label);
+    else alert(label + '：' + text);
+  };
   if (navigator.clipboard && navigator.clipboard.writeText) {
     let settled = false;
     navigator.clipboard.writeText(text).then(() => {
@@ -2820,12 +2959,17 @@ function fallbackCopy(text, done) {
     const ok = document.execCommand('copy');
     document.body.removeChild(ta);
     if (ok && done) done();
-    else alert('复制失败，请手动复制：' + text);
+    else {
+      if (typeof showToast === 'function') showToast('复制失败，请手动复制', { error: true });
+      else alert('复制失败，请手动复制：' + text);
+    }
   } catch (e) {
-    alert('复制失败，请手动复制：' + text);
+    if (typeof showToast === 'function') showToast('复制失败，请手动复制', { error: true });
+    else alert('复制失败，请手动复制：' + text);
   }
 }
 function leave() {
+  closeRoomMore();
   if (!confirm('确定离开房间？')) return;
   [...peers.keys()].forEach((id) => closePeer(id));
   if (localStream) { localStream.getTracks().forEach((t) => t.stop()); localStream = null; }
