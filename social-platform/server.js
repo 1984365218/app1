@@ -868,6 +868,7 @@ app.post('/api/users/:id/password', async (req, res) => {
 });
 
 app.get('/r/:roomId', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.get(['/home', '/login'], (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 app.get('/health', async (req, res) => {
   try {
     await dbReady;

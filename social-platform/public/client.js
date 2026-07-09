@@ -30,6 +30,8 @@ const AVATAR_COLORS = [
 ];
 const savedSettings = loadSettings();
 const initialInviteRoom = parseInviteRoomFromUrl();
+/** 邀请进房：未登录时挂起，登录后再 join */
+let pendingInviteRoom = initialInviteRoom || '';
 
 // ---------- 全局状态 ----------
 let myId = null;
@@ -137,8 +139,190 @@ loadRuntimeConfig();
 
 // ---------- DOM 助手 ----------
 const $ = (id) => document.getElementById(id);
-const lobby = $('lobby');
+const auth = $('auth');
+const home = $('home');
+const lobby = $('lobby'); // 兼容占位
 const room = $('room');
+
+// ---------- 三页路由：auth / home / room ----------
+function isAuthed() {
+  const name = (userProfile.name || myName || '').trim();
+  return !!(sessionToken && name);
+}
+
+function parseAppRoute() {
+  const path = location.pathname || '/';
+  const m = path.match(/^\/r\/([A-Za-z0-9]+)/i);
+  if (m) return { view: 'room', roomId: normalizeRoomId(m[1]) };
+  if (/^\/home\/?$/i.test(path)) return { view: 'home', roomId: '' };
+  if (/^\/login\/?$/i.test(path)) return { view: 'auth', roomId: '' };
+  return { view: 'auth', roomId: '' };
+}
+
+function setAppUrl(view, roomId = '', { replace = false } = {}) {
+  let url = '/';
+  if (view === 'home') url = '/home';
+  else if (view === 'room' && roomId) url = `/r/${normalizeRoomId(roomId)}`;
+  else if (view === 'auth' && pendingInviteRoom) url = `/r/${normalizeRoomId(pendingInviteRoom)}`;
+  else url = '/';
+  const state = { view, roomId: roomId || pendingInviteRoom || '' };
+  try {
+    if (replace) history.replaceState(state, '', url);
+    else history.pushState(state, '', url);
+  } catch (e) { /* ignore */ }
+}
+
+function showAppView(view) {
+  const v = view === 'room' ? 'room' : view === 'home' ? 'home' : 'auth';
+  if (auth) auth.classList.toggle('hidden', v !== 'auth');
+  if (home) home.classList.toggle('hidden', v !== 'home');
+  if (room) room.classList.toggle('hidden', v !== 'room');
+  document.body.dataset.appView = v;
+  if (v === 'home') {
+    renderHomeUser();
+    loadPublicRooms();
+  }
+  if (v === 'auth' || v === 'home') {
+    try { renderEnvStatus(); } catch (e) { /* init order */ }
+  }
+}
+
+function goAuth({ replace = false } = {}) {
+  showAppView('auth');
+  setAppUrl('auth', '', { replace });
+}
+
+function goHome({ replace = false } = {}) {
+  pendingInviteRoom = '';
+  showAppView('home');
+  setAppUrl('home', '', { replace });
+}
+
+function showInviteBanner(roomId) {
+  const rid = normalizeRoomId(roomId);
+  if (!rid) return;
+  pendingInviteRoom = rid;
+  if ($('joinRoomId')) $('joinRoomId').value = rid;
+  if ($('inviteRoomLabel')) $('inviteRoomLabel').textContent = rid;
+  if ($('inviteNotice')) $('inviteNotice').classList.remove('hidden');
+  if ($('btnJoin')) $('btnJoin').textContent = '加入邀请';
+  if ($('userName')) $('userName').placeholder = '输入昵称后点「进入一起看」';
+  if ($('btnEnterHome')) $('btnEnterHome').textContent = '登录并加入房间';
+}
+
+function renderHomeUser() {
+  renderProfileUi();
+}
+
+async function continueFromAuth() {
+  const name = ($('userName') ? $('userName').value.trim() : '') || (userProfile.name || '').trim();
+  if (!name) {
+    alert('请先取个昵称');
+    if ($('userName')) $('userName').focus();
+    return;
+  }
+  if (!(await ensureReclaimResolved())) return;
+  try {
+    await prepareIdentity();
+  } catch (e) {
+    return;
+  }
+  if (!sessionToken) {
+    alert('登录会话未就绪，请刷新页面后重试');
+    return;
+  }
+  myName = userProfile.name || name;
+  renderProfileUi();
+  const invite = pendingInviteRoom || parseInviteRoomFromUrl();
+  if (invite) {
+    pendingInviteRoom = invite;
+    await joinRoom(invite, { auto: true });
+    return;
+  }
+  goHome({ replace: false });
+  if (typeof showToast === 'function') showToast('已进入首页，可以创建或加入房间');
+}
+
+function leaveRoomLocal() {
+  try { if (typeof exitWatch === 'function' && watchModeOn) exitWatch(); } catch (e) {}
+  [...peers.keys()].forEach((id) => closePeer(id));
+  if (localStream) {
+    try { localStream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+    localStream = null;
+  }
+  try { stopLocalMeter(); } catch (e) {}
+  try { socket.emit('room:leave'); } catch (e) {}
+  currentRoomId = null;
+  roomUsers = [];
+  isHost = false;
+  isOwner = false;
+  micOn = false;
+  try { if ($('chatMessages')) $('chatMessages').innerHTML = ''; } catch (e) {}
+}
+
+async function bootAppRoute() {
+  const route = parseAppRoute();
+  if (route.roomId) {
+    pendingInviteRoom = route.roomId;
+    showInviteBanner(route.roomId);
+  }
+
+  // 已在房内（极少：热更新）则保持
+  if (currentRoomId && route.view === 'room' && normalizeRoomId(route.roomId) === currentRoomId) {
+    showAppView('room');
+    return;
+  }
+
+  if (route.view === 'room' && route.roomId) {
+    if (isAuthed()) {
+      setTimeout(() => joinRoom(route.roomId, { auto: true }), 200);
+      return;
+    }
+    goAuth({ replace: true });
+    // 保持 /r/xxx URL
+    setAppUrl('auth', route.roomId, { replace: true });
+    return;
+  }
+
+  if (route.view === 'home') {
+    if (!isAuthed()) {
+      goAuth({ replace: true });
+      return;
+    }
+    goHome({ replace: true });
+    return;
+  }
+
+  // 默认登录页：已登录且无邀请 → 首页
+  if (isAuthed() && !pendingInviteRoom) {
+    goHome({ replace: true });
+    return;
+  }
+  showAppView('auth');
+  setAppUrl('auth', pendingInviteRoom || '', { replace: true });
+}
+
+window.addEventListener('popstate', () => {
+  const route = parseAppRoute();
+  if (currentRoomId && !(route.view === 'room' && normalizeRoomId(route.roomId) === currentRoomId)) {
+    leaveRoomLocal();
+  }
+  if (route.view === 'room' && route.roomId) {
+    pendingInviteRoom = route.roomId;
+    if (isAuthed()) joinRoom(route.roomId, { auto: true });
+    else {
+      showInviteBanner(route.roomId);
+      showAppView('auth');
+    }
+    return;
+  }
+  if (route.view === 'home') {
+    if (!isAuthed()) goAuth({ replace: true });
+    else showAppView('home');
+    return;
+  }
+  showAppView('auth');
+});
 
 function loadSettings() {
   try {
@@ -187,7 +371,7 @@ function renderProfileUi() {
   const name = userProfile.name || myName || '';
   // 仅接受经服务端校验过的 data:image/... 头像，防止任意字符串注入 CSS url()
   const safeAvatar = typeof userProfile.avatar === 'string' && /^data:image\/(png|jpeg|jpg|webp|gif);base64,/i.test(userProfile.avatar) ? userProfile.avatar : '';
-  const avatarEls = [$('profileAvatar'), $('profileAvatarLarge')].filter(Boolean);
+  const avatarEls = [$('profileAvatar'), $('profileAvatarLarge'), $('homeAvatar')].filter(Boolean);
   avatarEls.forEach((el) => {
     el.textContent = safeAvatar ? '' : avatarInitial(name);
     el.style.background = safeAvatar
@@ -197,6 +381,7 @@ function renderProfileUi() {
   if ($('profileNamePreview')) $('profileNamePreview').textContent = name || '未设置昵称';
   if ($('profileNameInput')) $('profileNameInput').value = name;
   if ($('userName') && document.activeElement !== $('userName')) $('userName').value = name;
+  if ($('homeNameLabel')) $('homeNameLabel').textContent = name || '朋友';
 }
 
 async function syncUserProfile({ silent = true } = {}) {
@@ -274,7 +459,7 @@ function applyTheme(theme, { persist = true } = {}) {
 }
 
 function initThemeControls() {
-  const selects = ['themeSelectLobby', 'themeSelectRoom', 'themeSelectWatch']
+  const selects = ['themeSelectLobby', 'themeSelectHome', 'themeSelectRoom', 'themeSelectWatch']
     .map((id) => $(id))
     .filter(Boolean);
 
@@ -383,6 +568,7 @@ function clearAccountHint() { showAccountHint(''); }
 function setCreateJoinEnabled(enabled) {
   if ($('btnCreate')) $('btnCreate').disabled = !enabled;
   if ($('btnJoin')) $('btnJoin').disabled = !enabled;
+  if ($('btnEnterHome')) $('btnEnterHome').disabled = !enabled;
 }
 
 function resetReclaimState() {
@@ -739,32 +925,30 @@ async function loadPublicRooms() {
 
 function logoutLocalAccount() {
   if (!confirm('退出当前账号将清掉本机保存的昵称/头像/账号 ID。下次回来需要重新召回或新建账号。确认退出吗？')) return;
+  if (currentRoomId) leaveRoomLocal();
   try {
     localStorage.removeItem(STORAGE_KEY);
   } catch (e) {}
   sessionToken = '';
   try { socket.auth = { token: '' }; } catch (e) {}
-  // 重新初始化本地身份
   userProfile = {
     id: createLocalUserId(),
     name: '',
     avatar: '',
     avatarColor: '',
+    hasPassword: false,
   };
   myName = '';
+  pendingInviteRoom = '';
   savedSettings.userId = userProfile.id;
   savedSettings.sessionToken = '';
+  savedSettings.userName = '';
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(savedSettings)); } catch (e) {}
-  renderProfileUi();
   if ($('profilePanel')) $('profilePanel').classList.add('hidden');
-  // 回大厅
-  if (lobby && lobby.classList.contains('hidden')) {
-    try { socket.disconnect(); } catch (e) {}
-    location.reload();
-  } else {
-    if ($('userName')) $('userName').value = '';
-    renderProfileUi();
-  }
+  if ($('userName')) $('userName').value = '';
+  renderProfileUi();
+  goAuth({ replace: true });
+  if (typeof showToast === 'function') showToast('已退出本机账号');
 }
 
 if ($('btnCopyAccountId')) $('btnCopyAccountId').addEventListener('click', () => {
@@ -943,15 +1127,20 @@ document.querySelectorAll('[data-lobby-tab]').forEach((btn) => {
 });
 setLobbyTab('create');
 
-if (myName) $('userName').value = myName;
+if (myName && $('userName')) $('userName').value = myName;
 if (initialInviteRoom) {
-  $('joinRoomId').value = initialInviteRoom;
-  $('btnJoin').textContent = '加入邀请';
-  $('inviteRoomLabel').textContent = initialInviteRoom;
-  $('inviteNotice').classList.remove('hidden');
+  showInviteBanner(initialInviteRoom);
   setLobbyTab('join');
-  // 邀请链接场景：提示用户输完昵称按回车即可直接加入，不走账号召回流程
-  if ($('userName')) $('userName').placeholder = '输入昵称，按回车即可加入房间';
+}
+if ($('btnEnterHome')) {
+  $('btnEnterHome').addEventListener('click', () => continueFromAuth());
+}
+if ($('openProfileHome')) {
+  $('openProfileHome').addEventListener('click', () => {
+    renderProfileUi();
+    if (typeof renderProfileAccountBox === 'function') renderProfileAccountBox();
+    $('profilePanel').classList.remove('hidden');
+  });
 }
 
 // ---------- 加密可用性兜底（正常情况 crypto-polyfill.js 已注入 crypto.subtle） ----------
@@ -1182,15 +1371,15 @@ $('userName').addEventListener('input', () => {
     setCreateJoinEnabled(true);
   }
 });
-$('userName').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    if (initialInviteRoom) joinRoom(initialInviteRoom, { auto: true }); // 邀请链接：跳过召回门禁直接进
-    else createRoom();
-  }
-});
+if ($('userName')) {
+  $('userName').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') continueFromAuth();
+  });
+}
 
 async function prepareIdentity({ host = false } = {}) {
-  myName = $('userName').value.trim() || `用户${Math.random().toString(36).slice(2, 6)}`;
+  const fromInput = $('userName') ? $('userName').value.trim() : '';
+  myName = fromInput || (userProfile.name || myName || '').trim() || `用户${Math.random().toString(36).slice(2, 6)}`;
   persistProfile({ name: myName });
   renderProfileUi();
   await syncUserProfile({ silent: true });
@@ -1305,15 +1494,15 @@ function updateOwnerHostUi() {
 
 function enterRoom(roomId, { created = false } = {}) {
   currentRoomId = normalizeRoomId(roomId);
-  lobby.classList.add('hidden');
-  room.classList.remove('hidden');
+  pendingInviteRoom = '';
+  showAppView('room');
+  setAppUrl('room', currentRoomId, { replace: true });
   // 房间名先占位，room:state 到达后会用服务端的 room.name 覆盖
   const inputName = $('roomNameInput') ? $('roomNameInput').value.trim() : '';
   $('roomName').textContent = inputName || '观影房';
   $('roomIdLabel').textContent = currentRoomId;
-  $('btnCopy').title = '复制邀请链接';
+  if ($('btnCopy')) $('btnCopy').title = '复制邀请链接';
   updateOwnerHostUi();
-  if (history.replaceState) history.replaceState(null, '', `/r/${currentRoomId}`);
   // 创建房时 prepareIdentity 已生成群密钥：立刻按房间缓存，便于下次同号重进解密
   if (cqCrypto.hasKey() && userProfile.id) {
     cqCrypto.persistRoomKey(currentRoomId, userProfile.id).catch(() => {});
@@ -1332,9 +1521,8 @@ function enterRoom(roomId, { created = false } = {}) {
   updateRoomHome();
 }
 
-if (initialInviteRoom && myName) {
-  setTimeout(() => joinRoom(initialInviteRoom, { auto: true }), 250);
-}
+// 启动路由：登录页 / 首页 / 邀请进房
+bootAppRoute();
 
 // ---------- 加密密钥协商 ----------
 socket.on('crypto:pubkey', async ({ fromId, pubKey }) => {
@@ -1506,36 +1694,20 @@ socket.on('user:leave', ({ id }) => {
   closePeer(id);
   if (u) appendSystem(`「${u.name}」离开了房间`);
 });
-// 房间被所有者删除：清理本地状态，弹提示回大厅
+// 房间被所有者删除：清理本地状态，回首页
 socket.on('room:destroyed', ({ roomId, by }) => {
   const isMe = by === socket.id;
-  [...peers.keys()].forEach((id) => closePeer(id));
-  if (localStream) { localStream.getTracks().forEach((t) => t.stop()); localStream = null; }
-  stopLocalMeter();
-  currentRoomId = null;
-  roomUsers = [];
-  isHost = false;
-  isOwner = false;
+  leaveRoomLocal();
   resetReclaimState();
-  room.classList.add('hidden');
-  lobby.classList.remove('hidden');
-  if (history.replaceState) history.replaceState(null, '', '/');
-  alert(isMe ? '房间已删除。' : '房间已被所有者删除，你已返回大厅。');
-  loadPublicRooms();
+  if (isAuthed()) goHome({ replace: true });
+  else goAuth({ replace: true });
+  alert(isMe ? '房间已删除。' : '房间已被所有者删除，你已返回首页。');
 });
 socket.on('user:kicked', ({ roomId, by }) => {
-  [...peers.keys()].forEach((id) => closePeer(id));
-  if (localStream) { localStream.getTracks().forEach((t) => t.stop()); localStream = null; }
-  stopLocalMeter();
-  currentRoomId = null;
-  roomUsers = [];
-  isHost = false;
-  isOwner = false;
-  room.classList.add('hidden');
-  lobby.classList.remove('hidden');
-  if (history.replaceState) history.replaceState(null, '', '/');
+  leaveRoomLocal();
+  if (isAuthed()) goHome({ replace: true });
+  else goAuth({ replace: true });
   alert(`你已被${by ? `「${by}」` : ''}移出房间。`);
-  loadPublicRooms();
 });
 socket.on('room:options', (opts) => {
   applyRoomMeta(opts || {});
@@ -2971,12 +3143,11 @@ function fallbackCopy(text, done) {
 function leave() {
   closeRoomMore();
   if (!confirm('确定离开房间？')) return;
-  [...peers.keys()].forEach((id) => closePeer(id));
-  if (localStream) { localStream.getTracks().forEach((t) => t.stop()); localStream = null; }
-  stopLocalMeter(); // 停止麦克风试音电平表，避免离开后仍占用音频上下文
-  try { socket.disconnect(); } catch (e) {}
-  // 关键：跳到根路径，避免留在 /r/ABCDEF 页面被 reload 后因 (initialInviteRoom && myName) 又自动重新加入
-  location.href = '/';
+  leaveRoomLocal();
+  pendingInviteRoom = '';
+  if (isAuthed()) goHome({ replace: true });
+  else goAuth({ replace: true });
+  if (typeof showToast === 'function') showToast('已离开房间');
 }
 
 // ===================================================================

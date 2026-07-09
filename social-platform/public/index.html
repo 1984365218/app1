@@ -20,17 +20,17 @@
 </head>
 <body>
 
-  <!-- ========== 大厅 ========== -->
-  <div id="lobby" class="view view-lobby">
+  <!-- ========== 1. 登录 / 身份页 ========== -->
+  <div id="auth" class="view view-auth">
     <div class="lobby-bg" aria-hidden="true"></div>
     <div class="lobby-shell">
-      <div class="lobby-card">
+      <div class="lobby-card auth-card">
         <header class="lobby-header">
           <div class="lobby-brand">
             <div class="logo-mark" aria-hidden="true">🎬</div>
             <div>
               <h1>一起看</h1>
-              <p class="subtitle">和朋友一起看片、聊天、连麦</p>
+              <p class="subtitle">先取个昵称，再去约片</p>
             </div>
           </div>
           <label class="theme-pill">
@@ -39,14 +39,22 @@
           </label>
         </header>
 
-        <!-- 1. 我是谁 -->
-        <section class="lobby-block" aria-labelledby="lobbyWhoTitle">
-          <h2 id="lobbyWhoTitle" class="lobby-step">我是谁</h2>
+        <div id="inviteNotice" class="invite-notice hidden">
+          <div class="invite-copy">
+            <span>朋友邀请你加入</span>
+            <strong id="inviteRoomLabel"></strong>
+          </div>
+          <span class="invite-arrow" aria-hidden="true">↓ 先登录再进房</span>
+        </div>
+
+        <section class="lobby-block" aria-labelledby="authWhoTitle">
+          <h2 id="authWhoTitle" class="lobby-step">登录</h2>
           <div class="who-row">
             <button id="avatarPick" class="avatar-pick" type="button" title="更换头像">
               <span id="profileAvatar" class="profile-avatar"></span>
             </button>
             <div class="who-main">
+              <label class="field-label" for="userName">昵称</label>
               <div class="form-group">
                 <input id="userName" placeholder="输入昵称即可开始" maxlength="20" autocomplete="off" />
               </div>
@@ -60,17 +68,45 @@
           <div id="accountHint" class="account-hint hidden"></div>
         </section>
 
-        <div id="inviteNotice" class="invite-notice hidden">
-          <div class="invite-copy">
-            <span>朋友邀请你加入</span>
-            <strong id="inviteRoomLabel"></strong>
-          </div>
-          <span class="invite-arrow" aria-hidden="true">↓</span>
-        </div>
+        <button id="btnEnterHome" class="btn-primary" type="button">进入一起看</button>
 
-        <!-- 2. 去哪里 -->
-        <section class="lobby-block" aria-labelledby="lobbyGoTitle">
-          <h2 id="lobbyGoTitle" class="lobby-step">去哪里</h2>
+        <details class="env-panel" id="envPanel">
+          <summary class="env-head">
+            <span>连接状态</span>
+            <strong id="envSummary">检测中</strong>
+          </summary>
+          <div id="envChecks" class="env-checks"></div>
+        </details>
+
+        <p class="hint">视频在各自设备本地播放，服务器只同步进度与聊天。</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 2. 登录后首页（建房 / 加入） ========== -->
+  <div id="home" class="view view-home hidden">
+    <div class="lobby-bg" aria-hidden="true"></div>
+    <div class="lobby-shell lobby-shell-wide">
+      <div class="lobby-card home-card">
+        <header class="home-header">
+          <div class="home-user">
+            <span id="homeAvatar" class="profile-avatar profile-avatar-sm"></span>
+            <div class="home-user-text">
+              <span class="home-hello">你好</span>
+              <strong id="homeNameLabel">朋友</strong>
+            </div>
+          </div>
+          <div class="home-header-actions">
+            <button id="openProfileHome" class="btn-ghost" type="button">账号</button>
+            <label class="theme-pill">
+              <span class="sr-only">主题</span>
+              <select id="themeSelectHome" class="theme-select" aria-label="主题风格"></select>
+            </label>
+          </div>
+        </header>
+
+        <section class="lobby-block" aria-labelledby="homeGoTitle">
+          <h2 id="homeGoTitle" class="lobby-step">去哪里</h2>
           <div class="lobby-tabs" role="tablist" aria-label="进房方式">
             <button type="button" class="lobby-tab active" data-lobby-tab="create" role="tab" aria-selected="true">创建房间</button>
             <button type="button" class="lobby-tab" data-lobby-tab="join" role="tab" aria-selected="false">加入房间</button>
@@ -106,24 +142,18 @@
           </section>
         </section>
 
-        <!-- 3. 可进的房间 -->
         <div id="publicRooms" class="lobby-block public-rooms hidden">
           <h2 class="lobby-step pr-head">可进的房间</h2>
           <div id="publicRoomsList" class="pr-list"></div>
         </div>
 
-        <details class="env-panel" id="envPanel">
-          <summary class="env-head">
-            <span>连接状态</span>
-            <strong id="envSummary">检测中</strong>
-          </summary>
-          <div id="envChecks" class="env-checks"></div>
-        </details>
-
-        <p class="hint">视频在各自设备本地播放，服务器只同步进度与聊天。</p>
+        <p class="hint">需要换账号？打开「账号」→ 退出本机账号。</p>
       </div>
     </div>
   </div>
+
+  <!-- 兼容旧脚本：#lobby 指向首页壳（隐藏占位，逻辑用 showAppView） -->
+  <div id="lobby" class="hidden" aria-hidden="true"></div>
 
   <!-- ========== 房间 ========== -->
   <div id="room" class="view view-room hidden">
